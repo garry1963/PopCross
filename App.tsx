@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { generatePuzzle } from './services/geminiService';
+import { getUsedWords, addWordsToHistory, initializeDatabase } from './services/puzzleDatabase';
 import { Grid } from './components/Grid';
 import { Keyboard } from './components/Keyboard';
 import { ClueBar } from './components/ClueBar';
 import { CATEGORIES, ICONS } from './constants';
 import { PuzzleData, GridCell, Direction, CellPosition, UserStats, ViewState, WordData, Category, Region } from './types';
-import { Play, RotateCcw, Award, ArrowLeft, X, Timer, Zap, CheckCircle2, XCircle, Globe, Flame, Save, Trash2 } from 'lucide-react';
+import { Play, RotateCcw, Award, ArrowLeft, X, Timer, Zap, CheckCircle2, XCircle, Globe, Flame, Save, Trash2, CalendarCheck } from 'lucide-react';
 
 export default function App() {
   // --- Global State ---
@@ -15,12 +16,13 @@ export default function App() {
   const [userStats, setUserStats] = useState<UserStats>(() => {
     const saved = localStorage.getItem('popcross_user_stats');
     return saved ? JSON.parse(saved) : {
-      xp: 1250,
-      level: 5,
-      stars: 320,
-      streak: 14,
-      completedPuzzles: 42,
-      hintsUsed: 0
+      xp: 0,
+      level: 1,
+      stars: 50,
+      streak: 0,
+      completedPuzzles: 0,
+      hintsUsed: 0,
+      lastDailyComplete: 0
     };
   });
 
@@ -50,6 +52,7 @@ export default function App() {
   // --- UI State ---
   const [selectedCategory, setSelectedCategory] = useState<Category | null>(null);
   const [hasSavedGame, setHasSavedGame] = useState(false);
+  const [dailyCategory, setDailyCategory] = useState<Category | null>(null);
 
   // --- Persistence Logic ---
 
@@ -66,7 +69,38 @@ export default function App() {
     }
   }, []);
 
-  // 3. Auto-save Game State
+  // 3. Initialize Content Database & Validate Streak
+  useEffect(() => {
+    // A. Init Database (Loads Clues on First Run)
+    initializeDatabase();
+
+    // B. Determine Daily Category
+    const todayStr = new Date().toISOString().slice(0, 10);
+    let hash = 0;
+    for (let i = 0; i < todayStr.length; i++) {
+      hash = ((hash << 5) - hash) + todayStr.charCodeAt(i);
+      hash |= 0;
+    }
+    const index = Math.abs(hash) % CATEGORIES.length;
+    setDailyCategory(CATEGORIES[index]);
+
+    // C. Check Streak Integrity
+    const lastComplete = userStats.lastDailyComplete || 0;
+    if (lastComplete > 0 && userStats.streak > 0) {
+        const now = new Date();
+        const last = new Date(lastComplete);
+        
+        const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+        const yesterdayStart = todayStart - 86400000;
+        
+        // If last completed before yesterday (start of yesterday), streak is broken
+        if (last.getTime() < yesterdayStart) {
+            setUserStats(prev => ({ ...prev, streak: 0 }));
+        }
+    }
+  }, []);
+
+  // 4. Auto-save Game State
   useEffect(() => {
     if (view === 'GAME' && puzzle && !solved && !loading) {
       const gameState = {
@@ -158,7 +192,7 @@ export default function App() {
     }
   };
 
-  const startPuzzle = async (category: string, difficulty: 'Easy' | 'Medium' | 'Hard') => {
+  const startPuzzle = async (category: string, difficulty: 'Easy' | 'Medium' | 'Hard', isDaily = false) => {
     // If a saved game exists and we are starting a new one, clear the old save
     if (hasSavedGame) {
         if (!window.confirm("Start new puzzle? Your saved progress will be lost.")) {
@@ -174,8 +208,23 @@ export default function App() {
     setGameResult(null);
 
     try {
-      const puz = await generatePuzzle(category, difficulty, puzzleRegion);
+      // 1. Get History
+      const usedWords = getUsedWords(category);
+      
+      // 2. Generate
+      const puz = await generatePuzzle(category, difficulty, puzzleRegion, usedWords);
+      
       if (puz) {
+        // 3. Update History with new words
+        const newWords = puz.words.map(w => w.answer);
+        addWordsToHistory(category, newWords);
+
+        // Flag as daily if needed
+        if (isDaily) {
+            puz.isDaily = true;
+            puz.title = `Daily: ${category}`;
+        }
+
         setPuzzle(puz);
         initGrid(puz);
         setView('GAME');
@@ -427,8 +476,6 @@ export default function App() {
     }
 
     if (isComplete && isCorrect) {
-      setSolved(true);
-      
       // --- Calculate Rewards ---
       const hintsUsed = userStats.hintsUsed;
       const timeTaken = elapsedTime;
@@ -443,17 +490,50 @@ export default function App() {
       const totalXp = baseXp + timeBonus + hintBonus;
       const starsEarned = 25;
 
+      const challenges = [
+          { label: "Puzzle Complete", success: true, reward: `+${baseXp} XP` },
+          { label: "Speed Demon (< 3m)", success: isSpeedRun, reward: `+${timeBonus} XP` },
+          { label: "Pure Genius (0 hints)", success: isPureGenius, reward: `+${hintBonus} XP` }
+      ];
+
+      // --- Streak Logic for Daily Puzzles ---
+      let newStreak = userStats.streak;
+      let streakBonus = false;
+
+      if (puzzle?.isDaily) {
+          const now = new Date();
+          const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+          const lastComplete = userStats.lastDailyComplete || 0;
+          const lastDate = new Date(lastComplete);
+          const lastDateStart = new Date(lastDate.getFullYear(), lastDate.getMonth(), lastDate.getDate()).getTime();
+          
+          // Check if already played today
+          if (lastDateStart !== todayStart) {
+               // If last played yesterday (streak valid), increment
+               const yesterdayStart = todayStart - 86400000;
+               
+               if (lastDateStart === yesterdayStart) {
+                   newStreak += 1;
+               } else {
+                   // Gap or first time
+                   newStreak = 1; // "Increase current streak by 1" from 0
+               }
+               streakBonus = true;
+               challenges.push({ label: "Daily Streak", success: true, reward: `${newStreak} Days` });
+          } else {
+             // Already played today, no streak increment
+             challenges.push({ label: "Already Played Today", success: true, reward: `Streak: ${newStreak}` });
+          }
+      }
+
+      setSolved(true);
       setGameResult({
         baseXp,
         timeBonus,
         hintBonus,
         totalXp,
         starsEarned,
-        challenges: [
-          { label: "Puzzle Complete", success: true, reward: `+${baseXp} XP` },
-          { label: "Speed Demon (< 3m)", success: isSpeedRun, reward: `+${timeBonus} XP` },
-          { label: "Pure Genius (0 hints)", success: isPureGenius, reward: `+${hintBonus} XP` }
-        ]
+        challenges
       });
 
       setUserStats(prev => {
@@ -464,7 +544,9 @@ export default function App() {
            xp: newXp,
            level: newLevel,
            stars: prev.stars + starsEarned,
-           completedPuzzles: prev.completedPuzzles + 1
+           completedPuzzles: prev.completedPuzzles + 1,
+           streak: newStreak,
+           lastDailyComplete: puzzle?.isDaily ? Date.now() : prev.lastDailyComplete
         };
       });
       
@@ -644,7 +726,7 @@ export default function App() {
           )}
 
           {/* Daily Challenge Card */}
-          <section className="mb-10 relative group cursor-pointer" onClick={() => startPuzzle('Daily Mix', 'Medium')}>
+          <section className="mb-10 relative group cursor-pointer" onClick={() => dailyCategory && startPuzzle(dailyCategory.name, 'Medium', true)}>
             <div className="absolute inset-0 bg-gradient-to-r from-neon-purple via-neon-pink to-neon-yellow rounded-3xl blur opacity-30 group-hover:opacity-60 transition-opacity duration-500"></div>
             <div className="relative bg-dark-900/80 backdrop-blur-xl border border-white/10 rounded-3xl p-6 sm:p-8 flex flex-col gap-6 overflow-hidden">
                {/* Decorative background stripes */}
@@ -656,16 +738,18 @@ export default function App() {
                      <span className="text-[10px] font-bold bg-gradient-to-r from-neon-purple to-neon-pink text-white px-2 py-0.5 rounded uppercase tracking-wider">Daily Drop</span>
                      <span className="text-[10px] font-mono text-neon-cyan animate-pulse">LIVE NOW</span>
                    </div>
-                   <h2 className="text-4xl sm:text-5xl font-black italic tracking-tighter text-white drop-shadow-lg">CULTURE <br/>VULTURE</h2>
-                   <p className="text-gray-300 text-sm mt-3 max-w-xs font-light">Today's curated mix of trending topics, viral memes, and chart-toppers.</p>
+                   <h2 className="text-4xl sm:text-5xl font-black italic tracking-tighter text-white drop-shadow-lg leading-none">
+                     {dailyCategory ? dailyCategory.name.toUpperCase() : "DAILY PUZZLE"}
+                   </h2>
+                   <p className="text-gray-300 text-sm mt-3 max-w-xs font-light">Today's curated mix. Complete it to build your streak!</p>
                  </div>
                  <div className="hidden sm:block">
-                   <Flame className="w-16 h-16 text-neon-pink animate-pulse-fast drop-shadow-[0_0_10px_rgba(247,37,133,0.5)]" />
+                   <CalendarCheck className="w-16 h-16 text-neon-pink animate-pulse-fast drop-shadow-[0_0_10px_rgba(247,37,133,0.5)]" />
                  </div>
                </div>
                
                <button className="relative z-10 w-full sm:w-auto bg-white text-black font-black py-4 px-8 rounded-xl flex items-center justify-center gap-2 hover:scale-[1.02] active:scale-95 transition-all shadow-[0_0_20px_rgba(255,255,255,0.3)]">
-                 <Play className="w-5 h-5 fill-black" /> PLAY NOW
+                 <Play className="w-5 h-5 fill-black" /> PLAY DAILY
                </button>
             </div>
           </section>
@@ -757,9 +841,9 @@ export default function App() {
                         <span className="text-gray-500 text-[10px] uppercase font-bold tracking-widest mb-1 pl-1">Select Difficulty</span>
                         
                         {[
-                          { id: 'Easy', color: 'neon-cyan', desc: '3-6 letters', sub: 'Popular & Simple' },
-                          { id: 'Medium', color: 'neon-yellow', desc: '4-9 letters', sub: 'Fan Favorites' },
-                          { id: 'Hard', color: 'neon-pink', desc: '5-12 letters', sub: 'Deep Cuts' }
+                          { id: 'Easy', color: 'neon-cyan', desc: '10-12 Words', sub: 'Quick & Breezy' },
+                          { id: 'Medium', color: 'neon-yellow', desc: '18-20 Words', sub: 'The Standard' },
+                          { id: 'Hard', color: 'neon-pink', desc: '25-30 Words', sub: 'Brain Burner' }
                         ].map((level) => (
                            <button 
                             key={level.id}

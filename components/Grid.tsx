@@ -61,8 +61,9 @@ export const Grid: React.FC<GridProps> = ({
               const currentWordId = selectedCell ? grid[selectedCell.row][selectedCell.col].wordIds[selectedDirection] : undefined;
               const isRelated = selectedCell && currentWordId && cell.wordIds[selectedDirection] === currentWordId;
               
-              // Base Style
-              let baseClasses = "bg-dark-800/80 text-gray-300 border border-transparent";
+              // Base Style - Significantly lighter than background (#020410)
+              // bg-dark-700 is #242D45
+              let baseClasses = "bg-dark-700 text-gray-200 border border-transparent";
               
               // Conditional Styles
               if (isSelected) {
@@ -79,7 +80,7 @@ export const Grid: React.FC<GridProps> = ({
                 baseClasses = "bg-red-900/50 text-red-200 border-red-500 animate-pulse";
               } else if (cell.status === 'locked') {
                 // Revealed
-                baseClasses = "bg-dark-700 text-gray-400 border-dashed border-gray-600";
+                baseClasses = "bg-dark-600 text-gray-400 border-dashed border-gray-600";
               }
 
               const showClueNum = cell.clueNumbers[Direction.ACROSS] || cell.clueNumbers[Direction.DOWN];
@@ -101,11 +102,11 @@ export const Grid: React.FC<GridProps> = ({
                     aspect-square
                     ${fontSizeClass}
                     ${baseClasses}
-                    hover:bg-dark-700
+                    hover:brightness-125
                   `}
                 >
                   {showClueNum ? (
-                    <span className="absolute top-[1px] left-[2px] text-[0.45rem] md:text-[0.6rem] leading-none text-gray-500 font-mono opacity-80 pointer-events-none">
+                    <span className="absolute top-[1px] left-[2px] text-[0.45rem] md:text-[0.6rem] leading-none text-gray-400 font-mono opacity-80 pointer-events-none">
                       {showClueNum}
                     </span>
                   ) : null}

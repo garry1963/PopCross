@@ -1,3 +1,4 @@
+
 import React, { ReactNode } from 'react';
 
 export enum Direction {
@@ -40,6 +41,7 @@ export interface PuzzleData {
   height: number;
   words: WordData[];
   difficulty: 'Easy' | 'Medium' | 'Hard';
+  isDaily?: boolean;
 }
 
 export interface UserStats {
@@ -49,6 +51,7 @@ export interface UserStats {
   streak: number;
   completedPuzzles: number;
   hintsUsed: number;
+  lastDailyComplete?: number; // Timestamp
 }
 
 export type ViewState = 'HOME' | 'GAME' | 'CATEGORY_SELECT' | 'PROFILE';

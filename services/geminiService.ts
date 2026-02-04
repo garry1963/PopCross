@@ -1,5 +1,6 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { PuzzleData, Direction, WordData, Region } from "../types";
+import { getWordsForPuzzle, saveNewWordsToDB } from "./puzzleDatabase";
 
 // --- Types for Layout Engine ---
 interface RawWord {
@@ -7,24 +8,7 @@ interface RawWord {
   clue: string;
 }
 
-// --- Fallback Data ---
-const FALLBACK_DATA: RawWord[] = [
-  { word: 'OFFICE', clue: 'Dunder Mifflin documentary' },
-  { word: 'ROSS', clue: 'Paleontologist with a monkey' },
-  { word: 'SEINFELD', clue: 'A show about nothing' },
-  { word: 'FRIENDS', clue: 'Pivot! Pivot! Pivot!' },
-  { word: 'LOST', clue: 'Plane crash on a mysterious island' },
-  { word: 'ADELE', clue: 'Singer who says Hello' },
-  { word: 'TITANIC', clue: 'Near, far, wherever you are movie' },
-  { word: 'DUNE', clue: 'Spice planet blockbuster' },
-  { word: 'BEYONCE', clue: 'Queen Bey of music' },
-  { word: 'MATRIX', clue: 'Red pill or blue pill?' },
-  { word: 'OFFER', clue: 'Refusal is not an option' },
-  { word: 'NETFLIX', clue: 'Streaming giant' }
-];
-
 // --- Crossword Layout Engine ---
-
 const generateLayout = (rawWords: RawWord[], theme: string, difficulty: string): PuzzleData => {
   const GRID_SIZE = 40; // Internal scratchpad size
   const MID = Math.floor(GRID_SIZE / 2);
@@ -221,21 +205,42 @@ const canPlace = (
 
 // --- Main Service ---
 
-export const generatePuzzle = async (category: string, difficulty: string, region: Region): Promise<PuzzleData> => {
+export const generatePuzzle = async (
+    category: string, 
+    difficulty: string, 
+    region: Region,
+    excludeWords: string[] = []
+): Promise<PuzzleData> => {
   let apiKey: string | undefined;
   try { apiKey = process.env.API_KEY; } catch (e) {}
 
-  // Fallback if no key
+  // 1. TRY LOCAL DB FIRST
+  // Get a large batch to attempt layout
+  const localBatch = getWordsForPuzzle(category, region, difficulty as any);
+  
+  // We need at least 8-10 words to make a decent puzzle instantly
+  if (localBatch.length >= 8) {
+     console.log("Generating from Local Database...");
+     try {
+         // Filter out excluded words from local batch just in case
+         const filteredBatch = localBatch.filter(w => !excludeWords.includes(w.word));
+         // Use local batch if sufficient, else fallback to API
+         if (filteredBatch.length >= 6) {
+             return generateLayout(filteredBatch, category, difficulty);
+         }
+     } catch (e) {
+         console.warn("Local layout failed, falling back to API");
+     }
+  }
+
+  // 2. FALLBACK TO API
   if (!apiKey || typeof apiKey !== 'string' || apiKey.trim() === '') {
-    console.warn("Using fallback logic");
-    return new Promise(resolve => setTimeout(() => {
-        try {
-           resolve(generateLayout(FALLBACK_DATA, category, difficulty));
-        } catch (e) {
-            // Even fallback might fail layout if randomness is unlucky, retry once
-             resolve(generateLayout(FALLBACK_DATA, category, difficulty));
-        }
-    }, 800));
+     // If no API key and local DB failed, we are in trouble, but let's try 
+     // to use whatever local data we have, even if small.
+     if (localBatch.length > 0) {
+         return generateLayout(localBatch, category, difficulty);
+     }
+     throw new Error("No API Key and Local DB is empty.");
   }
 
   try {
@@ -249,39 +254,46 @@ export const generatePuzzle = async (category: string, difficulty: string, regio
 
     switch(difficulty) {
         case 'Easy':
-            complexityPrompt = "Use EXTREMELY POPULAR, well-known mainstream answers. Simple, direct clues suitable for beginners.";
+            complexityPrompt = "Use fun, popular answers. Simple, direct clues.";
             minLen = 3;
-            maxLen = 7;
-            numWords = 18;
+            maxLen = 10;
+            numWords = 15;
             break;
         case 'Hard':
-            complexityPrompt = "Use obscure facts, deep cuts, b-sides, or slightly cryptic trivia. Answers can be longer or more complex.";
-            minLen = 4;
-            maxLen = 12;
-            numWords = 25; // More words to increase intersection density
+            complexityPrompt = "Use obscure facts, deep cuts, or cryptic trivia.";
+            minLen = 3;
+            maxLen = 14; 
+            numWords = 30;
             break;
         default: // Medium
-            complexityPrompt = "Standard trivia difficulty. A mix of famous hits and some specific knowledge.";
+            complexityPrompt = "Standard trivia difficulty.";
             minLen = 3;
-            maxLen = 9;
-            numWords = 20;
+            maxLen = 12;
+            numWords = 25;
             break;
     }
 
     // Define Region Parameters
     let regionPrompt = "Include a diverse mix of US and UK pop culture.";
     if (region === 'USA') {
-        regionPrompt = "Prioritize American pop culture, US TV shows, Hollywood movies, and US spelling (e.g. Color).";
+        regionPrompt = "Prioritize American pop culture.";
     } else if (region === 'UK') {
-        regionPrompt = "Prioritize British pop culture, UK TV shows (e.g. BBC, Channel 4), British bands, and UK spelling (e.g. Colour).";
+        regionPrompt = "Prioritize British pop culture.";
     }
 
-    // Request JUST words, not the grid. This is 10x faster.
+    const recentExclusions = excludeWords.slice(-50);
+    const excludePrompt = recentExclusions.length > 0 
+        ? `Ensure answers are unique. DO NOT use these words: ${recentExclusions.join(', ')}.` 
+        : "";
+
+    const requestCount = numWords + 10; 
+
     const prompt = `
-      Generate a list of ${numWords} words and clues for a crossword puzzle about "${category}".
-      Focus strictly on Pop Culture (TV, Movies, Music) related to this theme.
+      Generate a list of ${requestCount} words and clues for a crossword puzzle about "${category}".
+      Focus strictly on Pop Culture (TV, Movies, Music, etc.) related to ${category}.
       ${regionPrompt}
       ${complexityPrompt}
+      ${excludePrompt}
       Words should be between ${minLen} and ${maxLen} letters long.
       Return purely JSON.
       Format: { "words": [ { "word": "ANSWER", "clue": "Hint" }, ... ] }
@@ -319,27 +331,30 @@ export const generatePuzzle = async (category: string, difficulty: string, regio
     const data = JSON.parse(jsonStr);
     let wordList: RawWord[] = data.words || [];
 
-    // Filter valid words based on constraints
+    // Sanitize
     wordList = wordList.filter(w => w.word && w.word.length >= 3 && /^[A-Z]+$/i.test(w.word));
     wordList = wordList.map(w => ({ ...w, word: w.word.toUpperCase() }));
 
-    // Additional length filtering to ensure the model respected constraints
-    wordList = wordList.filter(w => w.word.length <= maxLen + 1); // +1 buffer just in case
+    // SAVE NEW WORDS TO LOCAL DB FOR FUTURE USE
+    saveNewWordsToDB(category, wordList);
 
-    if (wordList.length < 5) throw new Error("Not enough words generated");
+    // Client filtering
+    const excludeSet = new Set(excludeWords);
+    const uniqueWordList = wordList.filter(w => !excludeSet.has(w.word));
 
-    // Run local layout engine
-    // We try a couple of times because the greedy algorithm outcome depends on sort/randomness
-    try {
-        return generateLayout(wordList, category, difficulty);
-    } catch (layoutError) {
-        console.warn("First layout attempt failed, retrying...");
-        return generateLayout(wordList, category, difficulty);
+    let finalPool = uniqueWordList;
+    if (uniqueWordList.length < 8) {
+        finalPool = [...uniqueWordList, ...wordList.filter(w => excludeSet.has(w.word))];
     }
+
+    if (finalPool.length < 5) throw new Error("Not enough words generated");
+
+    return generateLayout(finalPool, category, difficulty);
 
   } catch (error) {
     console.error("Gemini Error:", error);
-    // Use fallback data but try to respect the requested category name in the title
-    return generateLayout(FALLBACK_DATA, category, difficulty);
+    // If API fails, try local DB again even if small
+    if (localBatch.length > 0) return generateLayout(localBatch, category, difficulty);
+    throw error;
   }
 };
