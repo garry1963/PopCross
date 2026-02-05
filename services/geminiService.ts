@@ -1,360 +1,356 @@
-import { GoogleGenAI, Type } from "@google/genai";
-import { PuzzleData, Direction, WordData, Region } from "../types";
-import { getWordsForPuzzle, saveNewWordsToDB } from "./puzzleDatabase";
+import { GoogleGenAI, Type, Schema } from "@google/genai";
+import { PuzzleData, Clue, Difficulty, Region } from "../types";
+import { getWordBank, saveToWordBank, WordItem } from "./storageService";
 
-// --- Types for Layout Engine ---
-interface RawWord {
-  word: string;
-  clue: string;
+const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+
+// Configuration
+// gemini-3-flash-preview is optimized for speed and instruction following
+const MODEL_ID = "gemini-3-flash-preview"; 
+
+interface DifficultyProfile {
+    gridSize: number;
+    minWords: number;      // Minimum required to accept the puzzle
+    targetWords: number;   // Stop generation if we hit this
+    fetchCount: number;    // How many candidates to ask AI for
 }
 
-// --- Crossword Layout Engine ---
-const generateLayout = (rawWords: RawWord[], theme: string, difficulty: string): PuzzleData => {
-  const GRID_SIZE = 40; // Internal scratchpad size
-  const MID = Math.floor(GRID_SIZE / 2);
-  
-  // 1. Initialize empty grid
-  // grid[row][col] = char
-  const grid: (string | null)[][] = Array.from({ length: GRID_SIZE }, () => Array(GRID_SIZE).fill(null));
-  
-  const placedWords: WordData[] = [];
-  
-  // 2. Sort words by length (longest first helps structure)
-  const sortedWords = [...rawWords].sort((a, b) => b.word.length - a.word.length);
-  
-  // 3. Place first word in the middle horizontally
-  if (sortedWords.length === 0) throw new Error("No words to place");
-  
-  const first = sortedWords[0];
-  const firstRow = MID;
-  const firstCol = MID - Math.floor(first.word.length / 2);
-  
-  // Helper to actually write to grid
-  const writeToGrid = (word: string, row: number, col: number, dir: Direction) => {
-    for (let i = 0; i < word.length; i++) {
-      if (dir === Direction.ACROSS) grid[row][col + i] = word[i];
-      else grid[row + i][col] = word[i];
-    }
-  };
-
-  // Place first
-  writeToGrid(first.word, firstRow, firstCol, Direction.ACROSS);
-  placedWords.push({
-    id: 'w-0',
-    word: first.word,
-    answer: first.word,
-    clue: first.clue,
-    startRow: firstRow,
-    startCol: firstCol,
-    direction: Direction.ACROSS
-  });
-  
-  const remaining = sortedWords.slice(1);
-  
-  // 4. Try to place remaining words
-  // Simple heuristic: Try to cross existing words
-  
-  for (const nextItem of remaining) {
-    const word = nextItem.word;
-    let placed = false;
-    
-    // Try to find a match with any already placed word
-    // Randomize order of placed words to check to create variety
-    const targets = [...placedWords].sort(() => Math.random() - 0.5);
-    
-    for (const target of targets) {
-      if (placed) break;
-      
-      // Find intersection character
-      for (let i = 0; i < word.length; i++) {
-        if (placed) break;
-        const char = word[i];
-        
-        for (let j = 0; j < target.word.length; j++) {
-           if (target.word[j] === char) {
-             // Potential intersection found
-             // Target is at target.startRow/Col. 
-             // Intersection absolute coords:
-             const intRow = target.direction === Direction.ACROSS ? target.startRow : target.startRow + j;
-             const intCol = target.direction === Direction.ACROSS ? target.startCol + j : target.startCol;
-             
-             // If we place 'word' perpendicular to 'target'
-             const newDir = target.direction === Direction.ACROSS ? Direction.DOWN : Direction.ACROSS;
-             
-             // Calculate proposed start for new word
-             const newStartRow = newDir === Direction.DOWN ? intRow - i : intRow;
-             const newStartCol = newDir === Direction.ACROSS ? intCol - i : intCol;
-             
-             if (canPlace(grid, word, newStartRow, newStartCol, newDir)) {
-               writeToGrid(word, newStartRow, newStartCol, newDir);
-               placedWords.push({
-                 id: `w-${placedWords.length}`,
-                 word: word,
-                 answer: word,
-                 clue: nextItem.clue,
-                 startRow: newStartRow,
-                 startCol: newStartCol,
-                 direction: newDir
-               });
-               placed = true;
-               break;
-             }
-           }
-        }
-      }
-    }
-  }
-  
-  // 5. Crop and Normalize
-  // Find bounds
-  let minR = GRID_SIZE, maxR = 0, minC = GRID_SIZE, maxC = 0;
-  placedWords.forEach(w => {
-    minR = Math.min(minR, w.startRow);
-    minC = Math.min(minC, w.startCol);
-    if (w.direction === Direction.DOWN) {
-      maxR = Math.max(maxR, w.startRow + w.word.length);
-      maxC = Math.max(maxC, w.startCol + 1);
-    } else {
-      maxR = Math.max(maxR, w.startRow + 1);
-      maxC = Math.max(maxC, w.startCol + w.word.length);
-    }
-  });
-  
-  const height = maxR - minR;
-  const width = maxC - minC;
-  
-  // Normalize coordinates
-  const finalWords = placedWords.map(w => ({
-    ...w,
-    startRow: w.startRow - minR,
-    startCol: w.startCol - minC
-  }));
-  
-  // Sort words for numbering logic (Top-left to bottom-right)
-  finalWords.sort((a, b) => {
-    if (a.startRow !== b.startRow) return a.startRow - b.startRow;
-    return a.startCol - b.startCol;
-  });
-
-  // Re-assign IDs based on sorted position to keep things clean
-  finalWords.forEach((w, i) => w.id = `word-${i}`);
-
-  // Pad the grid slightly if it's too small (< 10)
-  const finalWidth = Math.max(width, 10);
-  const finalHeight = Math.max(height, 10);
-
-  return {
-    id: `puz-${Date.now()}`,
-    title: `${theme} Crossword`,
-    theme: theme,
-    difficulty: difficulty as any,
-    width: finalWidth,
-    height: finalHeight,
-    words: finalWords
-  };
+const DIFFICULTY_CONFIG: Record<Difficulty, DifficultyProfile> = {
+    'Easy':   { gridSize: 9,  minWords: 6,  targetWords: 10, fetchCount: 30 },
+    'Medium': { gridSize: 11, minWords: 10, targetWords: 15, fetchCount: 40 },
+    'Hard':   { gridSize: 13, minWords: 15, targetWords: 20, fetchCount: 50 },
+    'Expert': { gridSize: 15, minWords: 20, targetWords: 25, fetchCount: 60 },
 };
 
-// Check if placement is valid
-const canPlace = (
-  grid: (string | null)[][], 
-  word: string, 
-  row: number, 
-  col: number, 
-  dir: Direction
-): boolean => {
-  const len = word.length;
-  const GRID_SIZE = grid.length;
-
-  // 1. Bounds check
-  if (row < 0 || col < 0) return false;
-  if (dir === Direction.ACROSS && col + len > GRID_SIZE) return false;
-  if (dir === Direction.DOWN && row + len > GRID_SIZE) return false;
-
-  // 2. Collision and adjacency check
-  for (let i = 0; i < len; i++) {
-    const r = dir === Direction.ACROSS ? row : row + i;
-    const c = dir === Direction.ACROSS ? col + i : col;
-    const char = word[i];
-    const cell = grid[r][c];
-
-    // Conflict: Cell is occupied by a different letter
-    if (cell !== null && cell !== char) return false;
+// 1. Fetch Word List
+const fetchWordList = async (topic: string, difficulty: Difficulty, region: Region): Promise<WordItem[]> => {
+    const config = DIFFICULTY_CONFIG[difficulty];
     
-    // If cell is empty, we must ensure we aren't creating accidental adjacency
-    if (cell === null) {
-      // Check perpendicular neighbors
-      // If placing ACROSS, check UP and DOWN neighbors
-      const pPrev = dir === Direction.ACROSS ? grid[r-1]?.[c] : grid[r][c-1];
-      const pNext = dir === Direction.ACROSS ? grid[r+1]?.[c] : grid[r][c+1];
-      
-      if (pPrev || pNext) return false; // Adjacent letter found where there shouldn't be one
-    }
-  }
-
-  // 3. Check start and end boundaries (cannot touch another word immediately before/after)
-  const beforeR = dir === Direction.ACROSS ? row : row - 1;
-  const beforeC = dir === Direction.ACROSS ? col - 1 : col;
-  if (grid[beforeR]?.[beforeC]) return false;
-
-  const afterR = dir === Direction.ACROSS ? row : row + len;
-  const afterC = dir === Direction.ACROSS ? col + len : col;
-  if (grid[afterR]?.[afterC]) return false;
-
-  return true;
-};
-
-// --- Main Service ---
-
-export const generatePuzzle = async (
-    category: string, 
-    difficulty: string, 
-    region: Region,
-    excludeWords: string[] = []
-): Promise<PuzzleData> => {
-  let apiKey: string | undefined;
-  try { apiKey = process.env.API_KEY; } catch (e) {}
-
-  // 1. TRY LOCAL DB FIRST
-  // Get a large batch to attempt layout
-  const localBatch = getWordsForPuzzle(category, region, difficulty as any);
-  
-  // We need at least 8-10 words to make a decent puzzle instantly
-  if (localBatch.length >= 8) {
-     console.log("Generating from Local Database...");
-     try {
-         // Filter out excluded words from local batch just in case
-         const filteredBatch = localBatch.filter(w => !excludeWords.includes(w.word));
-         // Use local batch if sufficient, else fallback to API
-         if (filteredBatch.length >= 6) {
-             return generateLayout(filteredBatch, category, difficulty);
-         }
-     } catch (e) {
-         console.warn("Local layout failed, falling back to API");
-     }
-  }
-
-  // 2. FALLBACK TO API
-  if (!apiKey || typeof apiKey !== 'string' || apiKey.trim() === '') {
-     // If no API key and local DB failed, we are in trouble, but let's try 
-     // to use whatever local data we have, even if small.
-     if (localBatch.length > 0) {
-         return generateLayout(localBatch, category, difficulty);
-     }
-     throw new Error("No API Key and Local DB is empty.");
-  }
-
-  try {
-    const ai = new GoogleGenAI({ apiKey });
-
-    // Define Difficulty Parameters
-    let complexityPrompt = "";
-    let minLen = 3;
-    let maxLen = 10;
-    let numWords = 20;
-
-    switch(difficulty) {
-        case 'Easy':
-            complexityPrompt = "Use fun, popular answers. Simple, direct clues.";
-            minLen = 3;
-            maxLen = 10;
-            numWords = 15;
-            break;
-        case 'Hard':
-            complexityPrompt = "Use obscure facts, deep cuts, or cryptic trivia.";
-            minLen = 3;
-            maxLen = 14; 
-            numWords = 30;
-            break;
-        default: // Medium
-            complexityPrompt = "Standard trivia difficulty.";
-            minLen = 3;
-            maxLen = 12;
-            numWords = 25;
-            break;
+    // A. Check Local Word Bank First
+    const cachedWords = getWordBank(topic, difficulty);
+    
+    // Check if we have enough cached words to satisfy the fetchCount (or at least a good chunk of it)
+    // We want a fresh mix, but if we have plenty, we skip AI.
+    if (cachedWords.length >= config.fetchCount) {
+        console.log(`Using Cached Words for ${difficulty} (${cachedWords.length} avail)`);
+        // Shuffle array
+        return cachedWords.sort(() => 0.5 - Math.random()); 
     }
 
-    // Define Region Parameters
-    let regionPrompt = "Include a diverse mix of US and UK pop culture.";
-    if (region === 'USA') {
-        regionPrompt = "Prioritize American pop culture.";
-    } else if (region === 'UK') {
-        regionPrompt = "Prioritize British pop culture.";
-    }
-
-    const recentExclusions = excludeWords.slice(-50);
-    const excludePrompt = recentExclusions.length > 0 
-        ? `Ensure answers are unique. DO NOT use these words: ${recentExclusions.join(', ')}.` 
-        : "";
-
-    const requestCount = numWords + 10; 
-
+    // B. If not enough cached, call AI
+    console.log(`Fetching ${config.fetchCount} new words from AI for ${difficulty}...`);
     const prompt = `
-      Generate a list of ${requestCount} words and clues for a crossword puzzle about "${category}".
-      Focus strictly on Pop Culture (TV, Movies, Music, etc.) related to ${category}.
-      ${regionPrompt}
-      ${complexityPrompt}
-      ${excludePrompt}
-      Words should be between ${minLen} and ${maxLen} letters long.
-      Return purely JSON.
-      Format: { "words": [ { "word": "ANSWER", "clue": "Hint" }, ... ] }
+      Generate a list of ${config.fetchCount} crossword answers and clues for the topic "${topic}" (${region} context).
+      Difficulty: ${difficulty}.
+      
+      Rules:
+      - Answers must be single words (no spaces) or common phrases with spaces removed.
+      - Uppercase only.
+      - Minimum length 3, Maximum length ${config.gridSize}.
+      - No special characters.
+      - Ensure a mix of word lengths (short words are important for connecting).
+      
+      Output JSON format:
+      [ { "answer": "WORD", "clue": "Hint" }, ... ]
     `;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3-flash-preview',
-      contents: prompt,
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            words: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  word: { type: Type.STRING },
-                  clue: { type: Type.STRING }
-                },
-                required: ["word", "clue"]
-              }
-            }
-          }
+    const schema: Schema = {
+        type: Type.ARRAY,
+        items: {
+            type: Type.OBJECT,
+            properties: {
+                answer: { type: Type.STRING },
+                clue: { type: Type.STRING }
+            },
+            required: ["answer", "clue"]
         }
-      }
-    });
+    };
 
-    if (!response.text) throw new Error("No response");
+    try {
+        const response = await ai.models.generateContent({
+            model: MODEL_ID,
+            contents: prompt,
+            config: {
+                responseMimeType: "application/json",
+                responseSchema: schema,
+                temperature: 0.8 // High creativity for variety
+            }
+        });
+        
+        let cleanText = response.text || "[]";
+        cleanText = cleanText.replace(/```json/g, '').replace(/```/g, '').trim();
+
+        const data = JSON.parse(cleanText);
+        
+        if (!Array.isArray(data)) return [];
+
+        // Strict sanitization
+        const validWords = data
+            .filter(i => i.answer && i.clue)
+            .map(i => ({
+                answer: i.answer.trim().toUpperCase().replace(/[^A-Z]/g, ''), // Remove non-alpha
+                clue: i.clue.trim()
+            }))
+            .filter(i => i.answer.length >= 3 && i.answer.length <= config.gridSize);
+            
+        // Save to Word Bank for next time
+        if (validWords.length > 0) {
+            saveToWordBank(topic, difficulty, validWords);
+        }
+
+        return validWords;
+
+    } catch (e) {
+        console.error("AI Fetch Error", e);
+        // Fallback to cache if AI fails, even if small
+        return cachedWords.length > 0 ? cachedWords : [];
+    }
+};
+
+// 2. Local Layout Algorithm
+// A greedy backtracking-lite approach to place words on a grid
+const generateLayout = (wordList: WordItem[], size: number): PuzzleData | null => {
+    if (wordList.length === 0) return null;
+
+    // Grid Initialization: '.' is empty/black, char is filled
+    let grid: string[][] = Array(size).fill(null).map(() => Array(size).fill('.'));
+    const clues: Clue[] = [];
     
-    let jsonStr = response.text.trim();
-    if (jsonStr.startsWith('```')) jsonStr = jsonStr.replace(/^```(json)?/, '').replace(/```$/, '');
+    // Helper to check bounds
+    const inBounds = (r: number, c: number) => r >= 0 && r < size && c >= 0 && c < size;
+
+    // Helper to check if a placement is valid
+    const canPlace = (word: string, r: number, c: number, dir: 'across' | 'down'): boolean => {
+        const len = word.length;
+        
+        // 0. Safety Checks
+        if (r < 0 || c < 0) return false;
+
+        // 1. Basic Bounds
+        if (dir === 'across') {
+            if (c + len > size) return false;
+            // Check ends are clear (must be black or boundary) to avoid extending words improperly
+            if (inBounds(r, c - 1) && grid[r][c - 1] !== '.') return false;
+            if (inBounds(r, c + len) && grid[r][c + len] !== '.') return false;
+        } else {
+            if (r + len > size) return false;
+            if (inBounds(r - 1, c) && grid[r - 1][c] !== '.') return false;
+            if (inBounds(r + len, c) && grid[r + len][c] !== '.') return false;
+        }
+
+        // 2. Cell interactions
+        for (let i = 0; i < len; i++) {
+            const curR = dir === 'across' ? r : r + i;
+            const curC = dir === 'across' ? c + i : c;
+            
+            // Double check bounds for safety, though 'Basic Bounds' should cover it
+            if (!inBounds(curR, curC)) return false;
+
+            const char = word[i];
+            const gridChar = grid[curR][curC];
+
+            // Collision check: Cell must be empty OR match the letter
+            if (gridChar !== '.' && gridChar !== char) return false;
+
+            // Adjacency check (Crucial for validity):
+            // If we are placing content into an EMPTY cell, we must ensure it doesn't accidentally
+            // touch other words on its parallel sides, creating 2-letter nonsense words.
+            if (gridChar === '.') {
+                if (dir === 'across') {
+                   // Check Top/Bottom neighbors
+                   if (inBounds(curR - 1, curC) && grid[curR - 1][curC] !== '.') return false;
+                   if (inBounds(curR + 1, curC) && grid[curR + 1][curC] !== '.') return false;
+                } else {
+                   // Check Left/Right neighbors
+                   if (inBounds(curR, curC - 1) && grid[curR][curC - 1] !== '.') return false;
+                   if (inBounds(curR, curC + 1) && grid[curR][curC + 1] !== '.') return false;
+                }
+            }
+        }
+        return true;
+    };
+
+    // Helper to commit word
+    const place = (item: WordItem, r: number, c: number, dir: 'across' | 'down') => {
+        for (let i = 0; i < item.answer.length; i++) {
+            const curR = dir === 'across' ? r : r + i;
+            const curC = dir === 'across' ? c + i : c;
+            grid[curR][curC] = item.answer[i];
+        }
+        clues.push({
+            number: 0, // Assigned later
+            direction: dir,
+            text: item.clue,
+            answer: item.answer,
+            row: r,
+            col: c
+        });
+    };
+
+    // --- Execution ---
     
-    const data = JSON.parse(jsonStr);
-    let wordList: RawWord[] = data.words || [];
+    // NOTE: We do NOT sort here anymore. We trust the input order.
+    // This allows the caller to try heuristic sort vs random shuffle.
+    const workingList = [...wordList]; 
+    const placedWords: WordItem[] = [];
 
-    // Sanitize
-    wordList = wordList.filter(w => w.word && w.word.length >= 3 && /^[A-Z]+$/i.test(w.word));
-    wordList = wordList.map(w => ({ ...w, word: w.word.toUpperCase() }));
+    // Place first word centered horizontally
+    const first = workingList[0];
+    const startR = Math.floor(size / 2);
+    const startC = Math.max(0, Math.floor((size - first.answer.length) / 2));
+    
+    if (canPlace(first.answer, startR, startC, 'across')) {
+        place(first, startR, startC, 'across');
+        placedWords.push(first);
+    } else {
+        return null; 
+    }
+    
+    // Try to place remaining words
+    for (let i = 1; i < workingList.length; i++) {
+        const candidate = workingList[i];
+        let placed = false;
 
-    // SAVE NEW WORDS TO LOCAL DB FOR FUTURE USE
-    saveNewWordsToDB(category, wordList);
+        // Try to attach to existing words
+        // We shuffle the existing words order to create variety in branching
+        const shufflePlaced = [...placedWords].sort(() => 0.5 - Math.random());
 
-    // Client filtering
-    const excludeSet = new Set(excludeWords);
-    const uniqueWordList = wordList.filter(w => !excludeSet.has(w.word));
+        for (const existing of shufflePlaced) {
+             if (placed) break;
 
-    let finalPool = uniqueWordList;
-    if (uniqueWordList.length < 8) {
-        finalPool = [...uniqueWordList, ...wordList.filter(w => excludeSet.has(w.word))];
+             const existingClue = clues.find(c => c.answer === existing.answer);
+             if (!existingClue) continue;
+
+             // Find common letters
+             for (let cIdx = 0; cIdx < candidate.answer.length; cIdx++) {
+                 if (placed) break;
+                 const char = candidate.answer[cIdx];
+                 
+                 for (let eIdx = 0; eIdx < existing.answer.length; eIdx++) {
+                     if (existing.answer[eIdx] === char) {
+                         // Proposed Intersection
+                         const existingDir = existingClue.direction;
+                         const newDir = existingDir === 'across' ? 'down' : 'across';
+
+                         // Calculate proposed start pos based on intersection alignment
+                         const intR = existingDir === 'across' ? existingClue.row : existingClue.row + eIdx;
+                         const intC = existingDir === 'across' ? existingClue.col + eIdx : existingClue.col;
+
+                         const proposedR = newDir === 'down' ? intR - cIdx : intR;
+                         const proposedC = newDir === 'across' ? intC - cIdx : intC;
+
+                         if (canPlace(candidate.answer, proposedR, proposedC, newDir)) {
+                             place(candidate, proposedR, proposedC, newDir);
+                             placedWords.push(candidate);
+                             placed = true;
+                             break;
+                         }
+                     }
+                 }
+             }
+        }
     }
 
-    if (finalPool.length < 5) throw new Error("Not enough words generated");
+    // Renumbering logic (Standard Crossword Numbering)
+    clues.forEach(c => c.number = 0); 
+    let counter = 1;
+    
+    // Reset numbers
+    for (let r = 0; r < size; r++) {
+        for (let c = 0; c < size; c++) {
+            if (grid[r][c] === '.') continue;
+            
+            const startsAcross = clues.find(k => k.direction === 'across' && k.row === r && k.col === c);
+            const startsDown = clues.find(k => k.direction === 'down' && k.row === r && k.col === c);
 
-    return generateLayout(finalPool, category, difficulty);
-
-  } catch (error) {
-    console.error("Gemini Error:", error);
-    // If API fails, try local DB again even if small
-    if (localBatch.length > 0) return generateLayout(localBatch, category, difficulty);
-    throw error;
-  }
+            if (startsAcross || startsDown) {
+                if (startsAcross) startsAcross.number = counter;
+                if (startsDown) startsDown.number = counter;
+                counter++;
+            }
+        }
+    }
+    
+    return {
+        title: "Daily Puzzle",
+        theme: "Generated",
+        gridSize: size,
+        grid: grid,
+        clues: clues.sort((a,b) => a.number - b.number)
+    };
 };
+
+export const generatePuzzle = async (topic: string, difficulty: Difficulty, region: Region): Promise<PuzzleData> => {
+    const config = DIFFICULTY_CONFIG[difficulty];
+    
+    let words: WordItem[] = [];
+    try {
+        words = await fetchWordList(topic, difficulty, region);
+    } catch (e) {
+        throw new Error("Failed to fetch words.");
+    }
+
+    if (words.length === 0) throw new Error("Could not fetch words from AI");
+
+    // Critical: Filter words that simply cannot fit the grid
+    const fittingWords = words.filter(w => w.answer.length <= config.gridSize);
+    
+    // Relaxed check: We need enough words to TRY, but if we have fewer than minWords, it's risky.
+    // However, if we only have 8 words for Medium (target 10), we might still want to try to place them all.
+    if (fittingWords.length < 3) throw new Error("Not enough valid words for this grid size.");
+
+    let bestPuzzle: PuzzleData | null = null;
+
+    // Retry Strategy:
+    // Attempt 0: Longest words first (Standard heuristic)
+    // Attempt 1-24: Random shuffle (Brute force for variety)
+    const MAX_ATTEMPTS = 25;
+
+    for (let i = 0; i < MAX_ATTEMPTS; i++) {
+        let attemptList = [...fittingWords];
+        if (i === 0) {
+            // Heuristic sort: Longest words first often creates better spines
+            attemptList.sort((a, b) => b.answer.length - a.answer.length);
+        } else {
+            // Random shuffle
+            attemptList.sort(() => 0.5 - Math.random());
+        }
+
+        const candidate = generateLayout(attemptList, config.gridSize);
+        
+        if (candidate) {
+            // Score based on number of words placed
+            if (!bestPuzzle || candidate.clues.length > bestPuzzle.clues.length) {
+                bestPuzzle = candidate;
+            }
+            
+            // Optimization: If we hit our target density, we stop immediately.
+            if (candidate.clues.length >= config.targetWords) break;
+            
+            // Also stop if we managed to use almost all available words (e.g. 90%)
+            if (candidate.clues.length >= Math.floor(fittingWords.length * 0.9)) break;
+        }
+    }
+    
+    // Final Validation: Did we meet the minimum word count for this difficulty?
+    // We allow a small grace margin (e.g. 1 word less) to avoid frustrating failures if close.
+    if (!bestPuzzle || bestPuzzle.clues.length < (config.minWords - 1)) {
+        console.warn(`Failed to meet min words for ${difficulty}. Got ${bestPuzzle?.clues.length || 0}, wanted ${config.minWords}`);
+        throw new Error(`Could not build a dense enough ${difficulty} grid. Try again.`);
+    }
+
+    return { ...bestPuzzle, theme: topic };
+};
+
+export const getHintForCell = async (clue: string, currentAnswerPattern: string): Promise<string> => {
+    const prompt = `Clue: "${clue}". Pattern: "${currentAnswerPattern}". One short hint.`;
+    try {
+        const response = await ai.models.generateContent({
+            model: MODEL_ID,
+            contents: prompt
+        });
+        return response.text || "No hint available.";
+    } catch (e) {
+        return "Hint unavailable.";
+    }
+}

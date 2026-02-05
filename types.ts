@@ -1,67 +1,96 @@
+export type Direction = 'across' | 'down';
 
-import React, { ReactNode } from 'react';
-
-export enum Direction {
-  ACROSS = 'across',
-  DOWN = 'down',
-}
-
-export interface CellPosition {
-  row: number;
-  col: number;
-}
-
-export interface WordData {
-  id: string;
-  word: string;
-  clue: string;
-  startRow: number;
-  startCol: number;
+export interface Clue {
+  number: number;
   direction: Direction;
-  answer: string; // The correct answer
-}
-
-export interface GridCell {
+  text: string;
+  answer: string;
   row: number;
   col: number;
-  value: string; // User input
-  correctValue: string; // Actual answer
-  isBlack: boolean;
-  clueNumbers: { [key in Direction]?: number }; // If this cell starts a word
-  wordIds: { [key in Direction]?: string }; // IDs of words this cell belongs to
-  isLocked: boolean; // For revealed hints
-  status: 'empty' | 'correct' | 'incorrect' | 'editing' | 'locked';
+  type?: 'text' | 'audio' | 'emoji'; // For future expansion
+}
+
+export interface CellData {
+  row: number;
+  col: number;
+  value: string; // The correct letter
+  userValue: string; // The user's input
+  isBlack: boolean; // True if this is a void/block
+  number: number | null; // The clue number if this is the start of a word
+  active: boolean; // Is currently selected
+  related: boolean; // Is part of the active word
+  isCorrect: boolean; // Internal check for win condition
+  isRevealed: boolean; // Was this revealed by a tool?
+  isError?: boolean; // Is marked as incorrect
+  isWordComplete?: boolean; // Is part of a fully completed and correct word
 }
 
 export interface PuzzleData {
-  id: string;
   title: string;
   theme: string;
-  width: number;
-  height: number;
-  words: WordData[];
-  difficulty: 'Easy' | 'Medium' | 'Hard';
-  isDaily?: boolean;
+  gridSize: number;
+  grid: string[][]; // The solution grid
+  clues: Clue[];
+}
+
+export type Difficulty = 'Easy' | 'Medium' | 'Hard' | 'Expert';
+export type Region = 'Global' | 'USA' | 'UK';
+
+export interface GameSettings {
+  difficulty: Difficulty;
+  region: Region;
+  soundEnabled: boolean;
+  hapticEnabled: boolean;
+}
+
+export interface Badge {
+  id: string;
+  name: string;
+  icon: string;
+  description: string;
+  unlocked: boolean;
 }
 
 export interface UserStats {
-  xp: number;
+  totalPoints: number;
   level: number;
-  stars: number;
-  streak: number;
-  completedPuzzles: number;
-  hintsUsed: number;
-  lastDailyComplete?: number; // Timestamp
+  xp: number;
+  xpToNextLevel: number;
+  gamesPlayed: number;
+  gamesWon: number;
+  currentStreak: number;
+  maxStreak: number;
+  lastDailyDate: string | null;
+  badges: Badge[];
 }
 
-export type ViewState = 'HOME' | 'GAME' | 'CATEGORY_SELECT' | 'PROFILE';
+export interface GameState {
+  view: 'home' | 'categories' | 'profile' | 'game';
+  status: 'idle' | 'generating' | 'playing' | 'completed';
+  puzzle: PuzzleData | null;
+  grid: CellData[][];
+  selectedCell: { row: number; col: number } | null;
+  direction: Direction;
+  timer: number;
+  hintsUsed: number;
+  revealsUsed: number;
+  score: number;
+  isDaily: boolean;
+  settings: GameSettings;
+}
+
+export type TopicId = 
+  | 'General'
+  | 'Movies' | 'TV Shows' | 'Music' 
+  | '90s' | '2000s' | 'Modern' 
+  | 'Horror' | 'Sci-Fi' | 'Comedy' 
+  | 'Hip-Hop' | 'Rock' | 'Pop Divas' 
+  | 'Superheroes' | 'Reality TV' | 'Anime';
 
 export interface Category {
-  id: string;
-  name: string;
-  icon: ReactNode;
-  description: string;
-  color: string;
+    id: TopicId;
+    label: string;
+    icon: any; // Lucide icon component
+    color: string;
+    description: string;
 }
-
-export type Region = 'USA' | 'UK' | 'Mix';

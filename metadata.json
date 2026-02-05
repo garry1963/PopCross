@@ -1,5 +1,5 @@
 {
-  "name": "PopCross: Culture Puzzles",
-  "description": "A modern, neon-soaked crossword experience focused on TV, Movies, and Music. Powered by Gemini for infinite daily content.",
+  "name": "PopCross: Infinite Culture Puzzles",
+  "description": "A modern, neon-styled daily crossword game focused on TV, Movies, and Music. Powered by Gemini to generate fresh puzzles on demand.",
   "requestFramePermissions": []
 }

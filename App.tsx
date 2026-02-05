@@ -1,1015 +1,919 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { generatePuzzle } from './services/geminiService';
-import { getUsedWords, addWordsToHistory, initializeDatabase } from './services/puzzleDatabase';
-import { Grid } from './components/Grid';
-import { Keyboard } from './components/Keyboard';
-import { ClueBar } from './components/ClueBar';
-import { CATEGORIES, ICONS } from './constants';
-import { PuzzleData, GridCell, Direction, CellPosition, UserStats, ViewState, WordData, Category, Region } from './types';
-import { Play, RotateCcw, Award, ArrowLeft, X, Timer, Zap, CheckCircle2, XCircle, Globe, Flame, Save, Trash2, CalendarCheck } from 'lucide-react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { GameState, CellData, Direction, TopicId, Category, GameSettings, UserStats, Badge, Clue } from './types';
+import { generatePuzzle, getHintForCell } from './services/geminiService';
+import { getDailyPuzzleFromDb, saveDailyPuzzleToDb, saveGameState, loadGameState, clearGameState } from './services/storageService';
+import { PuzzleGrid } from './components/PuzzleGrid';
+import { VirtualKeyboard } from './components/VirtualKeyboard';
+import { 
+  Clapperboard, Music, Tv, Loader2, Sparkles, Trophy, 
+  Share2, Play, Zap, Calendar, Globe, Eye, Type, AlertCircle, Save,
+  Home, Grid, User, Settings, Skull, Mic2, Star, Disc, Film, Gamepad2, Volume2, VolumeX, Medal,
+  Laugh, Guitar, Sword, Smartphone, Check, Eye as EyeIcon, Type as TypeIcon, Hash, ArrowLeft, Brain
+} from 'lucide-react';
+
+// --- Configuration & Data ---
+
+const CATEGORIES: Category[] = [
+  { id: 'General', label: 'General', icon: <Brain size={20}/>, color: 'text-teal-400', description: 'Trivia & Variety' },
+  { id: 'Movies', label: 'Movies', icon: <Clapperboard size={20}/>, color: 'text-pink-400', description: 'Blockbusters & Classics' },
+  { id: 'TV Shows', label: 'TV Shows', icon: <Tv size={20}/>, color: 'text-blue-400', description: 'Binge-worthy Series' },
+  { id: 'Music', label: 'Music', icon: <Music size={20}/>, color: 'text-purple-400', description: 'Top Charts & Legends' },
+  { id: '90s', label: '90s Era', icon: <Gamepad2 size={20}/>, color: 'text-yellow-400', description: 'Nostalgia Trip' },
+  { id: '2000s', label: '2000s', icon: <Disc size={20}/>, color: 'text-cyan-400', description: 'Y2K Pop Culture' },
+  { id: 'Modern', label: 'Modern', icon: <Smartphone size={20}/>, color: 'text-emerald-400', description: 'Viral & Trending' },
+  { id: 'Horror', label: 'Horror', icon: <Skull size={20}/>, color: 'text-red-500', description: 'Spooky Season' },
+  { id: 'Sci-Fi', label: 'Sci-Fi', icon: <Globe size={20}/>, color: 'text-green-400', description: 'Space & Future' },
+  { id: 'Comedy', label: 'Comedy', icon: <Laugh size={20}/>, color: 'text-orange-400', description: 'Sitcoms & Stand-up' },
+  { id: 'Hip-Hop', label: 'Hip-Hop', icon: <Disc size={20}/>, color: 'text-amber-400', description: 'Bars & Beats' },
+  { id: 'Rock', label: 'Rock', icon: <Guitar size={20}/>, color: 'text-rose-400', description: 'Legends & Anthems' },
+  { id: 'Pop Divas', label: 'Pop Divas', icon: <Mic2 size={20}/>, color: 'text-fuchsia-400', description: 'Queens of Pop' },
+  { id: 'Superheroes', label: 'Heroes', icon: <Zap size={20}/>, color: 'text-blue-500', description: 'Marvel & DC' },
+  { id: 'Reality TV', label: 'Reality', icon: <Eye size={20}/>, color: 'text-indigo-400', description: 'Drama & Unscripted' },
+  { id: 'Anime', label: 'Anime', icon: <Sword size={20}/>, color: 'text-pink-500', description: 'Japan & Animation' },
+];
+
+const BADGES: Badge[] = [
+    { id: 'first_win', name: 'First Cut', icon: '🎬', description: 'Complete your first puzzle', unlocked: false },
+    { id: 'streak_3', name: 'On Fire', icon: '🔥', description: 'Reach a 3-day streak', unlocked: false },
+    { id: 'pop_star', name: 'Pop Star', icon: '⭐', description: 'Reach Level 5', unlocked: false },
+    { id: 'expert_solver', name: 'Cinephile', icon: '🎥', description: 'Solve a Hard puzzle without hints', unlocked: false },
+];
+
+const INITIAL_STATS: UserStats = {
+  totalPoints: 0,
+  level: 1,
+  xp: 0,
+  xpToNextLevel: 1000,
+  gamesPlayed: 0,
+  gamesWon: 0,
+  currentStreak: 0,
+  maxStreak: 0,
+  lastDailyDate: null,
+  badges: BADGES
+};
+
+const INITIAL_SETTINGS: GameSettings = {
+    difficulty: 'Medium',
+    region: 'Global',
+    soundEnabled: true,
+    hapticEnabled: true
+};
+
+const POINTS_BY_DIFFICULTY: Record<string, number> = {
+  'Easy': 500,
+  'Medium': 1000,
+  'Hard': 2500,
+  'Expert': 5000
+};
+
+const HINT_PENALTY = 50;
+const REVEAL_LETTER_PENALTY = 25;
+const REVEAL_WORD_PENALTY = 100;
 
 export default function App() {
-  // --- Global State ---
-  const [view, setView] = useState<ViewState>('HOME');
-  
-  // Load initial stats from local storage or default
-  const [userStats, setUserStats] = useState<UserStats>(() => {
-    const saved = localStorage.getItem('popcross_user_stats');
-    return saved ? JSON.parse(saved) : {
-      xp: 0,
-      level: 1,
-      stars: 50,
-      streak: 0,
-      completedPuzzles: 0,
-      hintsUsed: 0,
-      lastDailyComplete: 0
-    };
+  const [stats, setStats] = useState<UserStats>(INITIAL_STATS);
+  const [gameState, setGameState] = useState<GameState>({
+    view: 'home',
+    status: 'idle',
+    puzzle: null,
+    grid: [],
+    selectedCell: null,
+    direction: 'across',
+    timer: 0,
+    hintsUsed: 0,
+    revealsUsed: 0,
+    score: 0,
+    isDaily: false,
+    settings: INITIAL_SETTINGS
   });
 
-  // --- Game State ---
-  const [puzzle, setPuzzle] = useState<PuzzleData | null>(null);
-  const [grid, setGrid] = useState<GridCell[][]>([]);
-  const [selectedCell, setSelectedCell] = useState<CellPosition | null>(null);
-  const [direction, setDirection] = useState<Direction>(Direction.ACROSS);
-  const [loading, setLoading] = useState(false);
-  const [solved, setSolved] = useState(false);
-  const [elapsedTime, setElapsedTime] = useState(0); // Seconds
-  const [isPaused, setIsPaused] = useState(false);
-  
-  // --- Puzzle Config State ---
-  const [puzzleRegion, setPuzzleRegion] = useState<Region>('Mix');
-  
-  // --- Result State ---
-  const [gameResult, setGameResult] = useState<{
-    baseXp: number;
-    timeBonus: number;
-    hintBonus: number;
-    totalXp: number;
-    starsEarned: number;
-    challenges: { label: string; success: boolean; reward: string }[];
-  } | null>(null);
-  
-  // --- UI State ---
-  const [selectedCategory, setSelectedCategory] = useState<Category | null>(null);
-  const [hasSavedGame, setHasSavedGame] = useState(false);
-  const [dailyCategory, setDailyCategory] = useState<Category | null>(null);
+  const [aiHint, setAiHint] = useState<string | null>(null);
+  const [isAiThinking, setIsAiThinking] = useState(false);
+  const [savedGameExists, setSavedGameExists] = useState(false);
+  const [showRevealMenu, setShowRevealMenu] = useState(false);
 
-  // --- Persistence Logic ---
-
-  // 1. Save User Stats whenever they change
+  // --- Persistence ---
   useEffect(() => {
-    localStorage.setItem('popcross_user_stats', JSON.stringify(userStats));
-  }, [userStats]);
+    const savedStats = localStorage.getItem('popcross_stats_v2');
+    if (savedStats) setStats(JSON.parse(savedStats));
 
-  // 2. Check for saved game on mount
-  useEffect(() => {
-    const savedGame = localStorage.getItem('popcross_saved_game');
-    if (savedGame) {
-      setHasSavedGame(true);
-    }
+    const savedGame = loadGameState();
+    if (savedGame) setSavedGameExists(true);
   }, []);
 
-  // 3. Initialize Content Database & Validate Streak
   useEffect(() => {
-    // A. Init Database (Loads Clues on First Run)
-    initializeDatabase();
+    localStorage.setItem('popcross_stats_v2', JSON.stringify(stats));
+  }, [stats]);
 
-    // B. Determine Daily Category
-    const todayStr = new Date().toISOString().slice(0, 10);
-    let hash = 0;
-    for (let i = 0; i < todayStr.length; i++) {
-      hash = ((hash << 5) - hash) + todayStr.charCodeAt(i);
-      hash |= 0;
-    }
-    const index = Math.abs(hash) % CATEGORIES.length;
-    setDailyCategory(CATEGORIES[index]);
-
-    // C. Check Streak Integrity
-    const lastComplete = userStats.lastDailyComplete || 0;
-    if (lastComplete > 0 && userStats.streak > 0) {
-        const now = new Date();
-        const last = new Date(lastComplete);
-        
-        const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-        const yesterdayStart = todayStart - 86400000;
-        
-        // If last completed before yesterday (start of yesterday), streak is broken
-        if (last.getTime() < yesterdayStart) {
-            setUserStats(prev => ({ ...prev, streak: 0 }));
-        }
-    }
-  }, []);
-
-  // 4. Auto-save Game State
   useEffect(() => {
-    if (view === 'GAME' && puzzle && !solved && !loading) {
-      const gameState = {
-        puzzle,
-        grid,
-        elapsedTime,
-        hintsUsed: userStats.hintsUsed, // Track session hints
-        puzzleRegion,
-        timestamp: Date.now()
-      };
-      localStorage.setItem('popcross_saved_game', JSON.stringify(gameState));
-      setHasSavedGame(true);
-    } else if (solved) {
-      // Clear save on solve
-      localStorage.removeItem('popcross_saved_game');
-      setHasSavedGame(false);
+    if (gameState.status === 'playing') {
+      saveGameState(gameState);
+    } else if (gameState.status === 'completed' || gameState.status === 'idle') {
+       if (gameState.status === 'completed') {
+           clearGameState();
+           setSavedGameExists(false);
+       }
     }
-  }, [grid, puzzle, elapsedTime, solved, view, loading, userStats.hintsUsed, puzzleRegion]);
+  }, [gameState]);
 
-  // --- Timer Logic ---
+  // --- Game Loop ---
   useEffect(() => {
-    let interval: any;
-    if (view === 'GAME' && !solved && !loading && !isPaused) {
-      interval = setInterval(() => {
-        setElapsedTime(prev => prev + 1);
+    let interval: number;
+    if (gameState.status === 'playing') {
+      interval = window.setInterval(() => {
+        setGameState(prev => ({ ...prev, timer: prev.timer + 1 }));
       }, 1000);
     }
     return () => clearInterval(interval);
-  }, [view, solved, loading, isPaused]);
+  }, [gameState.status]);
 
-  const formatTime = (seconds: number) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-  };
+  // --- Logic ---
 
-  // --- Initialization Helper ---
-  const initGrid = (puz: PuzzleData) => {
-    // 1. Create Empty Grid
-    const newGrid: GridCell[][] = Array.from({ length: puz.height }, (_, r) => 
-      Array.from({ length: puz.width }, (_, c) => ({
-        row: r,
-        col: c,
-        value: '',
-        correctValue: '',
-        isBlack: true,
-        clueNumbers: {},
-        wordIds: {},
-        isLocked: false,
-        status: 'empty'
-      }))
-    );
+  const checkWordCompletions = (grid: CellData[][], clues: Clue[]): CellData[][] => {
+      // Create a clean grid copy or at least reset isWordComplete to avoid stale state
+      const nextGrid = grid.map(row => row.map(cell => ({...cell, isWordComplete: false})));
+      const completeCells = new Set<string>();
 
-    // 2. Map Words to Grid
-    puz.words.forEach((w, idx) => {
-      let r = w.startRow;
-      let c = w.startCol;
-      const num = idx + 1;
-
-      // Ensure start cell is valid
-      if (r < 0 || r >= puz.height || c < 0 || c >= puz.width) return;
-
-      // Mark clue number on start cell
-      if (!newGrid[r][c].clueNumbers[w.direction]) {
-         newGrid[r][c].clueNumbers[w.direction] = num; // Simplify: Using index+1 as clue num
-      }
-      
-      // Place characters
-      for (let i = 0; i < w.answer.length; i++) {
-        if (r >= puz.height || c >= puz.width) break;
-
-        newGrid[r][c].isBlack = false;
-        newGrid[r][c].correctValue = w.answer[i];
-        newGrid[r][c].wordIds[w.direction] = w.id;
-        
-        if (w.direction === Direction.ACROSS) c++;
-        else r++;
-      }
-    });
-
-    setGrid(newGrid);
-    setSolved(false);
-
-    // Select first available cell
-    const firstWord = puz.words[0];
-    if (firstWord) {
-      setSelectedCell({ row: firstWord.startRow, col: firstWord.startCol });
-      setDirection(firstWord.direction);
-    }
-  };
-
-  const startPuzzle = async (category: string, difficulty: 'Easy' | 'Medium' | 'Hard', isDaily = false) => {
-    // If a saved game exists and we are starting a new one, clear the old save
-    if (hasSavedGame) {
-        if (!window.confirm("Start new puzzle? Your saved progress will be lost.")) {
-            return;
-        }
-        localStorage.removeItem('popcross_saved_game');
-        setHasSavedGame(false);
-    }
-
-    setLoading(true);
-    setElapsedTime(0);
-    setUserStats(prev => ({ ...prev, hintsUsed: 0 })); // Reset hints for this session
-    setGameResult(null);
-
-    try {
-      // 1. Get History
-      const usedWords = getUsedWords(category);
-      
-      // 2. Generate
-      const puz = await generatePuzzle(category, difficulty, puzzleRegion, usedWords);
-      
-      if (puz) {
-        // 3. Update History with new words
-        const newWords = puz.words.map(w => w.answer);
-        addWordsToHistory(category, newWords);
-
-        // Flag as daily if needed
-        if (isDaily) {
-            puz.isDaily = true;
-            puz.title = `Daily: ${category}`;
-        }
-
-        setPuzzle(puz);
-        initGrid(puz);
-        setView('GAME');
-      }
-    } catch (e) {
-      console.error("Failed to start puzzle", e);
-      alert("Something went wrong generating the puzzle. Please try again.");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const resumeGame = () => {
-      try {
-          const savedData = localStorage.getItem('popcross_saved_game');
-          if (!savedData) return;
-          
-          const state = JSON.parse(savedData);
-          setPuzzle(state.puzzle);
-          setGrid(state.grid);
-          setElapsedTime(state.elapsedTime);
-          setPuzzleRegion(state.puzzleRegion || 'Mix');
-          
-          // Restore session hints without overwriting cumulative stats if possible, 
-          // but for now we just track current session hints in userStats
-          setUserStats(prev => ({ ...prev, hintsUsed: state.hintsUsed || 0 }));
-          
-          setSolved(false);
-          setGameResult(null);
-          setView('GAME');
-          
-          // Set selection to first available
-          if (state.puzzle.words.length > 0) {
-              const firstWord = state.puzzle.words[0];
-              setSelectedCell({ row: firstWord.startRow, col: firstWord.startCol });
-              setDirection(firstWord.direction);
-          }
-      } catch (e) {
-          console.error("Failed to load save", e);
-          alert("Could not load saved game.");
-          localStorage.removeItem('popcross_saved_game');
-          setHasSavedGame(false);
-      }
-  };
-
-  const discardSavedGame = (e: React.MouseEvent) => {
-      e.stopPropagation();
-      if (window.confirm("Discard saved game?")) {
-          localStorage.removeItem('popcross_saved_game');
-          setHasSavedGame(false);
-      }
-  };
-
-  // --- Gameplay Logic ---
-
-  const getCurrentWord = (): WordData | undefined => {
-    if (!selectedCell || !puzzle) return undefined;
-    const cell = grid[selectedCell.row][selectedCell.col];
-    const wordId = cell.wordIds[direction];
-    return puzzle.words.find(w => w.id === wordId);
-  };
-
-  const getNextCell = (r: number, c: number, dir: Direction): CellPosition | null => {
-    let nextR = r;
-    let nextC = c;
-    if (dir === Direction.ACROSS) nextC++;
-    else nextR++;
-
-    if (nextR >= grid.length || nextC >= grid[0].length) return null;
-    if (grid[nextR][nextC].isBlack) return null; // Stop at black squares (standard mini behavior)
-    return { row: nextR, col: nextC };
-  };
-  
-  const getPrevCell = (r: number, c: number, dir: Direction): CellPosition | null => {
-      let prevR = r;
-      let prevC = c;
-      if (dir === Direction.ACROSS) prevC--;
-      else prevR--;
-
-      if (prevR < 0 || prevC < 0) return null;
-      if (grid[prevR][prevC].isBlack) return null;
-      return { row: prevR, col: prevC };
-  }
-
-  // Check all words and update cell status to 'correct' if the word is complete
-  const updateGridStatus = (currentGrid: GridCell[][]) => {
-      if (!puzzle) return;
-      
-      const correctCells = new Set<string>();
-
-      // 1. Identify all correct words
-      puzzle.words.forEach(w => {
-          let isWordCorrect = true;
-          let r = w.startRow;
-          let c = w.startCol;
-          const cells: string[] = [];
-
-          for(let i=0; i<w.answer.length; i++) {
-              if (currentGrid[r][c].value !== w.answer[i]) {
-                  isWordCorrect = false;
+      clues.forEach(clue => {
+          let isComplete = true;
+          // Check Across
+          if (clue.direction === 'across') {
+              for(let i=0; i<clue.answer.length; i++) {
+                  const targetR = clue.row;
+                  const targetC = clue.col + i;
+                  if (!nextGrid[targetR] || !nextGrid[targetR][targetC] || nextGrid[targetR][targetC].userValue !== nextGrid[targetR][targetC].value) {
+                      isComplete = false;
+                      break;
+                  }
               }
-              cells.push(`${r},${c}`);
-              if (w.direction === Direction.ACROSS) c++;
-              else r++;
-          }
-
-          if (isWordCorrect) {
-              cells.forEach(id => correctCells.add(id));
-          }
-      });
-
-      // 2. Update grid status
-      for (let r = 0; r < currentGrid.length; r++) {
-          for (let c = 0; c < currentGrid[0].length; c++) {
-              if (currentGrid[r][c].isBlack) continue;
-
-              const isCorrect = correctCells.has(`${r},${c}`);
-              
-              if (isCorrect) {
-                  currentGrid[r][c].status = 'correct';
-              } else {
-                  if (currentGrid[r][c].status === 'correct' && !currentGrid[r][c].isLocked) {
-                      currentGrid[r][c].status = 'editing';
+              if (isComplete) {
+                  for(let i=0; i<clue.answer.length; i++) {
+                      completeCells.add(`${clue.row},${clue.col + i}`);
+                  }
+              }
+          } 
+          // Check Down
+          else {
+              for(let i=0; i<clue.answer.length; i++) {
+                  const targetR = clue.row + i;
+                  const targetC = clue.col;
+                  if (!nextGrid[targetR] || !nextGrid[targetR][targetC] || nextGrid[targetR][targetC].userValue !== nextGrid[targetR][targetC].value) {
+                      isComplete = false;
+                      break;
+                  }
+              }
+              if (isComplete) {
+                  for(let i=0; i<clue.answer.length; i++) {
+                      completeCells.add(`${clue.row + i},${clue.col}`);
                   }
               }
           }
+      });
+
+      // Apply completions
+      completeCells.forEach(key => {
+          const [r, c] = key.split(',').map(Number);
+          if (nextGrid[r] && nextGrid[r][c]) {
+            nextGrid[r][c].isWordComplete = true;
+          }
+      });
+      
+      return nextGrid;
+  };
+
+  const checkLevelUp = (currentStats: UserStats, pointsToAdd: number): UserStats => {
+      let { level, xp, xpToNextLevel, badges } = currentStats;
+      xp += pointsToAdd;
+      
+      while (xp >= xpToNextLevel) {
+          xp -= xpToNextLevel;
+          level++;
+          xpToNextLevel = Math.floor(xpToNextLevel * 1.2); // Curve
       }
+
+      // Check Badges
+      const newBadges = badges.map(b => {
+          if (b.id === 'first_win' && currentStats.gamesWon + 1 >= 1) return { ...b, unlocked: true };
+          if (b.id === 'streak_3' && currentStats.currentStreak >= 3) return { ...b, unlocked: true };
+          if (b.id === 'pop_star' && level >= 5) return { ...b, unlocked: true };
+          return b;
+      });
+
+      return {
+          ...currentStats,
+          level,
+          xp,
+          xpToNextLevel,
+          badges: newBadges
+      };
   };
 
-  const handleKeyPress = useCallback((key: string) => {
-    if (!selectedCell || solved) return;
+  const initGameFromPuzzle = (puzzle: any, isDaily: boolean, prevGameState: any) => {
+      const newGrid: CellData[][] = puzzle.grid.map((row: string[], r: number) => 
+        row.map((char: string, c: number) => ({
+          row: r,
+          col: c,
+          value: char,
+          userValue: '',
+          isBlack: char === '.',
+          number: null,
+          active: false,
+          related: false,
+          isCorrect: false,
+          isRevealed: false,
+          isWordComplete: false
+        }))
+      );
 
-    const { row, col } = selectedCell;
-    
-    // Deep copy grid to safely mutate
-    const newGrid = grid.map(r => r.map(c => ({...c})));
-    const cell = newGrid[row][col];
+      puzzle.clues.forEach((clue: Clue) => {
+         if (newGrid[clue.row] && newGrid[clue.row][clue.col]) {
+             newGrid[clue.row][clue.col].number = clue.number;
+         }
+      });
 
-    if (cell.isLocked) {
-        // Move to next if locked
-        const next = getNextCell(row, col, direction);
-        if (next) setSelectedCell(next);
-        return;
-    }
-
-    // Update value
-    cell.value = key;
-    // Reset status from incorrect/empty to editing
-    if (cell.status === 'incorrect' || cell.status === 'empty') {
-        cell.status = 'editing';
-    }
-    
-    // Run global validation for highlighting
-    updateGridStatus(newGrid);
-
-    setGrid(newGrid);
-
-    // Check if puzzle is solved
-    checkWinCondition(newGrid);
-
-    // Move to next cell automatically
-    const next = getNextCell(row, col, direction);
-    if (next) setSelectedCell(next);
-
-  }, [grid, selectedCell, direction, solved, puzzle]);
-
-  const handleDelete = useCallback(() => {
-    if (!selectedCell || solved) return;
-    const { row, col } = selectedCell;
-    
-    // Deep copy
-    const newGrid = grid.map(r => r.map(c => ({...c})));
-    
-    if (newGrid[row][col].value === '') {
-        // Backspace movement
-        const prev = getPrevCell(row, col, direction);
-        if(prev) {
-            setSelectedCell(prev);
-            if (!newGrid[prev.row][prev.col].isLocked) {
-                newGrid[prev.row][prev.col].value = '';
-                newGrid[prev.row][prev.col].status = 'editing';
-                updateGridStatus(newGrid); // Re-validate neighbors
-                setGrid(newGrid);
-            }
-        }
-    } else {
-        if (!newGrid[row][col].isLocked) {
-            newGrid[row][col].value = '';
-            newGrid[row][col].status = 'empty';
-            updateGridStatus(newGrid); // Re-validate neighbors (e.g. un-highlight a broken word)
-            setGrid(newGrid);
-        }
-    }
-  }, [grid, selectedCell, direction, solved, puzzle]);
-
-  const handleCellClick = (pos: CellPosition) => {
-    if (selectedCell?.row === pos.row && selectedCell?.col === pos.col) {
-      // Toggle direction if clicking same cell
-      setDirection(prev => prev === Direction.ACROSS ? Direction.DOWN : Direction.ACROSS);
-    } else {
-      setSelectedCell(pos);
-      // Smart direction switching: if new cell only has one word direction, switch to it
-      const cell = grid[pos.row][pos.col];
-      if (cell.wordIds.across && !cell.wordIds.down) setDirection(Direction.ACROSS);
-      else if (!cell.wordIds.across && cell.wordIds.down) setDirection(Direction.DOWN);
-    }
-  };
-
-  const handleNextClue = () => {
-    if (!puzzle || !selectedCell) return;
-    const currentWord = getCurrentWord();
-    if(!currentWord) return;
-
-    // Find current index
-    const idx = puzzle.words.findIndex(w => w.id === currentWord.id);
-    const nextIdx = (idx + 1) % puzzle.words.length;
-    const nextWord = puzzle.words[nextIdx];
-
-    setSelectedCell({ row: nextWord.startRow, col: nextWord.startCol });
-    setDirection(nextWord.direction);
-  };
-  
-  const handlePrevClue = () => {
-     if (!puzzle || !selectedCell) return;
-    const currentWord = getCurrentWord();
-    if(!currentWord) return;
-
-    // Find current index
-    const idx = puzzle.words.findIndex(w => w.id === currentWord.id);
-    const prevIdx = (idx - 1 + puzzle.words.length) % puzzle.words.length;
-    const prevWord = puzzle.words[prevIdx];
-
-    setSelectedCell({ row: prevWord.startRow, col: prevWord.startCol });
-    setDirection(prevWord.direction);
-  };
-
-  const checkWinCondition = (currentGrid: GridCell[][]) => {
-    let isComplete = true;
-    let isCorrect = true;
-
-    for (let r = 0; r < currentGrid.length; r++) {
-      for (let c = 0; c < currentGrid[0].length; c++) {
-        const cell = currentGrid[r][c];
-        if (!cell.isBlack) {
-          if (cell.value === '') isComplete = false;
-          if (cell.value !== cell.correctValue) isCorrect = false;
-        }
-      }
-    }
-
-    if (isComplete && isCorrect) {
-      // --- Calculate Rewards ---
-      const hintsUsed = userStats.hintsUsed;
-      const timeTaken = elapsedTime;
-      
-      const baseXp = 100;
-      const isSpeedRun = timeTaken < 180; // 3 minutes
-      const timeBonus = isSpeedRun ? 50 : 0;
-      
-      const isPureGenius = hintsUsed === 0;
-      const hintBonus = isPureGenius ? 50 : 0;
-      
-      const totalXp = baseXp + timeBonus + hintBonus;
-      const starsEarned = 25;
-
-      const challenges = [
-          { label: "Puzzle Complete", success: true, reward: `+${baseXp} XP` },
-          { label: "Speed Demon (< 3m)", success: isSpeedRun, reward: `+${timeBonus} XP` },
-          { label: "Pure Genius (0 hints)", success: isPureGenius, reward: `+${hintBonus} XP` }
-      ];
-
-      // --- Streak Logic for Daily Puzzles ---
-      let newStreak = userStats.streak;
-      let streakBonus = false;
-
-      if (puzzle?.isDaily) {
-          const now = new Date();
-          const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-          const lastComplete = userStats.lastDailyComplete || 0;
-          const lastDate = new Date(lastComplete);
-          const lastDateStart = new Date(lastDate.getFullYear(), lastDate.getMonth(), lastDate.getDate()).getTime();
-          
-          // Check if already played today
-          if (lastDateStart !== todayStart) {
-               // If last played yesterday (streak valid), increment
-               const yesterdayStart = todayStart - 86400000;
-               
-               if (lastDateStart === yesterdayStart) {
-                   newStreak += 1;
-               } else {
-                   // Gap or first time
-                   newStreak = 1; // "Increase current streak by 1" from 0
-               }
-               streakBonus = true;
-               challenges.push({ label: "Daily Streak", success: true, reward: `${newStreak} Days` });
-          } else {
-             // Already played today, no streak increment
-             challenges.push({ label: "Already Played Today", success: true, reward: `Streak: ${newStreak}` });
+      // Find first non-black cell
+      let startR = 0, startC = 0;
+      outer: for(let r=0; r<newGrid.length; r++) {
+          for(let c=0; c<newGrid.length; c++) {
+              if (!newGrid[r][c].isBlack) {
+                  startR = r; startC = c;
+                  break outer;
+              }
           }
       }
 
-      setSolved(true);
-      setGameResult({
-        baseXp,
-        timeBonus,
-        hintBonus,
-        totalXp,
-        starsEarned,
-        challenges
-      });
+      const newState: GameState = {
+        ...prevGameState,
+        status: 'playing',
+        puzzle,
+        grid: newGrid,
+        selectedCell: { row: startR, col: startC },
+        direction: 'across',
+        timer: 0,
+        hintsUsed: 0,
+        revealsUsed: 0,
+        score: 0,
+        isDaily,
+        view: 'game'
+      };
 
-      setUserStats(prev => {
-        const newXp = prev.xp + totalXp;
-        const newLevel = Math.floor(newXp / 1000) + 1; // Simple level curve
-        return {
-           ...prev,
-           xp: newXp,
-           level: newLevel,
-           stars: prev.stars + starsEarned,
-           completedPuzzles: prev.completedPuzzles + 1,
-           streak: newStreak,
-           lastDailyComplete: puzzle?.isDaily ? Date.now() : prev.lastDailyComplete
+      setGameState(newState);
+      updateSelectionHighlights(newGrid, { row: startR, col: startC }, 'across', newState);
+  }
+
+  const startNewGame = async (topic: string, isDaily: boolean = false) => {
+    setGameState(prev => ({ 
+      ...prev, 
+      status: 'generating', 
+      hintsUsed: 0, 
+      revealsUsed: 0, 
+      timer: 0,
+      score: 0,
+      isDaily,
+      view: 'game'
+    }));
+    setAiHint(null);
+    setShowRevealMenu(false);
+
+    // 1. Check Local DB for Daily Puzzle (Instant Load)
+    if (isDaily) {
+        const cachedDaily = getDailyPuzzleFromDb();
+        if (cachedDaily) {
+            console.log("Loading Daily from Cache");
+            initGameFromPuzzle(cachedDaily, true, gameState);
+            return;
+        }
+    }
+
+    // 2. Fallback to API Generation
+    try {
+      const theme = isDaily ? "Daily Mix" : topic;
+      const puzzle = await generatePuzzle(theme, gameState.settings.difficulty, gameState.settings.region);
+      
+      // Cache the result if it's the daily puzzle
+      if (isDaily) {
+          saveDailyPuzzleToDb(puzzle);
+      }
+
+      initGameFromPuzzle(puzzle, isDaily, gameState);
+
+    } catch (error: any) {
+      console.error(error);
+      setGameState(prev => ({ ...prev, status: 'idle', view: 'home' }));
+      alert(error.message || "Failed to generate puzzle. Please check your network or API key.");
+    }
+  };
+
+  const updateSelectionHighlights = (
+    currentGrid: CellData[][], 
+    selected: { row: number, col: number } | null, 
+    dir: Direction,
+    stateOverride?: GameState
+  ) => {
+    if (!selected) return;
+
+    const newGrid = currentGrid.map(row => row.map(cell => ({ ...cell, active: false, related: false })));
+    newGrid[selected.row][selected.col].active = true;
+
+    if (dir === 'across') {
+      // Highlight across word (stop at black squares)
+      let c = selected.col;
+      while(c >= 0 && !newGrid[selected.row][c].isBlack) { newGrid[selected.row][c].related = true; c--; }
+      c = selected.col + 1;
+      while(c < newGrid.length && !newGrid[selected.row][c].isBlack) { newGrid[selected.row][c].related = true; c++; }
+    } else {
+      // Highlight down word
+      let r = selected.row;
+      while(r >= 0 && !newGrid[r][selected.col].isBlack) { newGrid[r][selected.col].related = true; r--; }
+      r = selected.row + 1;
+      while(r < newGrid.length && !newGrid[r][selected.col].isBlack) { newGrid[r][selected.col].related = true; r++; }
+    }
+
+    setGameState(prev => ({ 
+        ...(stateOverride || prev), 
+        grid: newGrid, 
+        selectedCell: selected, 
+        direction: dir 
+    }));
+  };
+
+  const handleCellClick = (row: number, col: number) => {
+    if (gameState.status !== 'playing') return;
+    if (gameState.grid[row][col].isBlack) return;
+
+    if (gameState.selectedCell?.row === row && gameState.selectedCell?.col === col) {
+      const newDir = gameState.direction === 'across' ? 'down' : 'across';
+      updateSelectionHighlights(gameState.grid, { row, col }, newDir);
+    } else {
+      updateSelectionHighlights(gameState.grid, { row, col }, gameState.direction);
+    }
+  };
+
+  const handleInput = useCallback((char: string) => {
+    if (gameState.status !== 'playing' || !gameState.selectedCell || !gameState.puzzle) return;
+    const { row, col } = gameState.selectedCell;
+    
+    if (gameState.grid[row][col].isRevealed || gameState.grid[row][col].isBlack) return;
+
+    const newGrid = [...gameState.grid];
+    newGrid[row][col] = { 
+        ...newGrid[row][col], 
+        userValue: char, 
+        isCorrect: char === newGrid[row][col].value,
+        isError: false // Clear error when typing
+    };
+
+    // Smart Navigation: Skip black squares
+    let nextRow = row;
+    let nextCol = col;
+    
+    // Simple Next Cell Logic (Can be improved to jump black squares)
+    if (gameState.direction === 'across') {
+       if (col < newGrid.length - 1 && !newGrid[row][col+1].isBlack) nextCol++;
+    } else {
+       if (row < newGrid.length - 1 && !newGrid[row+1][col].isBlack) nextRow++;
+    }
+
+    const gridWithCompletions = checkWordCompletions(newGrid, gameState.puzzle.clues);
+    updateSelectionHighlights(gridWithCompletions, { row: nextRow, col: nextCol }, gameState.direction);
+    checkWinCondition(gridWithCompletions);
+  }, [gameState]);
+
+    const handleBackspace = useCallback(() => {
+    if (gameState.status !== 'playing' || !gameState.selectedCell || !gameState.puzzle) return;
+    const { row, col } = gameState.selectedCell;
+    const newGrid = [...gameState.grid];
+    
+    if (newGrid[row][col].isRevealed) return;
+
+    if (newGrid[row][col].userValue === '') {
+        let prevRow = row;
+        let prevCol = col;
+        if (gameState.direction === 'across') {
+            if (col > 0 && !newGrid[row][col-1].isBlack) prevCol--;
+        } else {
+            if (row > 0 && !newGrid[row-1][col].isBlack) prevRow--;
+        }
+        updateSelectionHighlights(newGrid, { row: prevRow, col: prevCol }, gameState.direction);
+    } else {
+        newGrid[row][col].userValue = '';
+        newGrid[row][col].isError = false; // Clear error on delete
+        // If we delete, a word might become incomplete, so re-run check
+        const gridWithCompletions = checkWordCompletions(newGrid, gameState.puzzle.clues);
+        setGameState(prev => ({ ...prev, grid: gridWithCompletions }));
+    }
+  }, [gameState]);
+
+  const checkWinCondition = (grid: CellData[][]) => {
+    const allCorrect = grid.every(row => row.every(cell => cell.isBlack || cell.userValue === cell.value));
+    if (allCorrect) {
+      const basePoints = POINTS_BY_DIFFICULTY[gameState.settings.difficulty];
+      const timeBonus = Math.max(0, 500 - (gameState.timer * 2));
+      const penalty = (gameState.hintsUsed * HINT_PENALTY) + (gameState.revealsUsed); 
+      const finalScore = Math.max(0, basePoints + timeBonus - penalty); 
+
+      setGameState(prev => ({ ...prev, status: 'completed', score: finalScore }));
+
+      const today = new Date().toISOString().split('T')[0];
+      setStats(prev => {
+        const isNewDay = prev.lastDailyDate !== today;
+        let newStreak = prev.currentStreak;
+        if (gameState.isDaily && isNewDay) newStreak += 1;
+        
+        const newStats = {
+          ...prev,
+          totalPoints: prev.totalPoints + finalScore,
+          gamesPlayed: prev.gamesPlayed + 1,
+          gamesWon: prev.gamesWon + 1,
+          currentStreak: newStreak,
+          maxStreak: Math.max(prev.maxStreak, newStreak),
+          lastDailyDate: gameState.isDaily ? today : prev.lastDailyDate
         };
+
+        return checkLevelUp(newStats, finalScore);
       });
-      
-      // Remove save game on win
-      localStorage.removeItem('popcross_saved_game');
-      setHasSavedGame(false);
     }
-  };
-  
-  const handleRevealLetter = () => {
-      const COST = 10;
-      if (userStats.stars < COST || solved || !selectedCell) return;
-      
-      const { row, col } = selectedCell;
-      // Deep copy
-      const newGrid = grid.map(r => r.map(c => ({...c})));
-      const cell = newGrid[row][col];
-      
-      if (cell.isLocked || cell.value === cell.correctValue) return; // Don't waste hint
-      
-      cell.value = cell.correctValue;
-      cell.isLocked = true;
-      cell.status = 'correct'; // Set to correct for green styling
-      
-      updateGridStatus(newGrid); // Update highlighting for surrounding words
-      setGrid(newGrid);
-      setUserStats(prev => ({...prev, stars: prev.stars - COST, hintsUsed: prev.hintsUsed + 1}));
-      checkWinCondition(newGrid);
-  };
-
-  const handleRevealWord = () => {
-      const COST = 25;
-      if (userStats.stars < COST || solved || !selectedCell) return;
-      
-      const currentWord = getCurrentWord();
-      if (!currentWord) return;
-
-      const newGrid = grid.map(r => r.map(c => ({...c})));
-      let r = currentWord.startRow;
-      let c = currentWord.startCol;
-      let revealedCount = 0;
-
-      for (let i = 0; i < currentWord.answer.length; i++) {
-          const cell = newGrid[r][c];
-          if (!cell.isLocked && cell.value !== cell.correctValue) {
-             cell.value = cell.correctValue;
-             cell.isLocked = true;
-             cell.status = 'correct'; // Set to correct for green styling
-             revealedCount++;
-          }
-          if (currentWord.direction === Direction.ACROSS) c++;
-          else r++;
-      }
-
-      if (revealedCount > 0) {
-          updateGridStatus(newGrid); // Update highlighting
-          setGrid(newGrid);
-          setUserStats(prev => ({...prev, stars: prev.stars - COST, hintsUsed: prev.hintsUsed + 1}));
-          checkWinCondition(newGrid);
-      }
   };
 
   const handleCheckPuzzle = () => {
-      if (solved) return;
-      
-      const newGrid = grid.map(row => row.map(cell => {
-          if (cell.isBlack) return {...cell};
-          if (cell.value !== '' && cell.value !== cell.correctValue) {
-              return { ...cell, status: 'incorrect' };
-          }
-          if (cell.value === cell.correctValue && !cell.isLocked) {
-              return { ...cell, status: 'correct' }; // Visual positive feedback
-          }
-          return {...cell};
-      }));
-      setGrid(newGrid);
+    if (!gameState.grid) return;
+    const newGrid = gameState.grid.map(row => row.map(cell => {
+      if (!cell.isBlack && cell.userValue !== '' && cell.userValue !== cell.value) {
+        return { ...cell, isError: true };
+      }
+      return cell;
+    }));
+    setGameState(prev => ({ ...prev, grid: newGrid }));
   };
 
-  // Keyboard Listeners for Desktop
+  const handleReveal = (type: 'cell' | 'word') => {
+    if (!gameState.selectedCell || !gameState.grid || !gameState.puzzle) return;
+    const { row, col } = gameState.selectedCell;
+    const newGrid = [...gameState.grid];
+    let penaltyToAdd = 0;
+
+    if (type === 'cell') {
+       if (!newGrid[row][col].isBlack && !newGrid[row][col].isRevealed) {
+           newGrid[row][col] = {
+               ...newGrid[row][col],
+               userValue: newGrid[row][col].value,
+               isCorrect: true,
+               isRevealed: true,
+               isError: false
+           };
+           penaltyToAdd = REVEAL_LETTER_PENALTY;
+       }
+    } else if (type === 'word') {
+       // Reveal entire word based on direction
+       if (gameState.direction === 'across') {
+           // Go left
+           let c = col;
+           while(c >= 0 && !newGrid[row][c].isBlack) { 
+               if (!newGrid[row][c].isRevealed) {
+                    newGrid[row][c].userValue = newGrid[row][c].value;
+                    newGrid[row][c].isCorrect = true;
+                    newGrid[row][c].isRevealed = true;
+                    newGrid[row][c].isError = false;
+               }
+               c--; 
+            }
+           // Go right
+           c = col + 1;
+           while(c < newGrid.length && !newGrid[row][c].isBlack) { 
+                if (!newGrid[row][c].isRevealed) {
+                    newGrid[row][c].userValue = newGrid[row][c].value;
+                    newGrid[row][c].isCorrect = true;
+                    newGrid[row][c].isRevealed = true;
+                    newGrid[row][c].isError = false;
+               }
+               c++; 
+            }
+       } else {
+           // Go up
+           let r = row;
+           while(r >= 0 && !newGrid[r][col].isBlack) { 
+               if (!newGrid[r][col].isRevealed) {
+                    newGrid[r][col].userValue = newGrid[r][col].value;
+                    newGrid[r][col].isCorrect = true;
+                    newGrid[r][col].isRevealed = true;
+                    newGrid[r][col].isError = false;
+               }
+               r--; 
+            }
+           // Go down
+           r = row + 1;
+           while(r < newGrid.length && !newGrid[r][col].isBlack) { 
+               if (!newGrid[r][col].isRevealed) {
+                    newGrid[r][col].userValue = newGrid[r][col].value;
+                    newGrid[r][col].isCorrect = true;
+                    newGrid[r][col].isRevealed = true;
+                    newGrid[r][col].isError = false;
+               }
+               r++; 
+            }
+       }
+       penaltyToAdd = REVEAL_WORD_PENALTY;
+    }
+
+    const gridWithCompletions = checkWordCompletions(newGrid, gameState.puzzle.clues);
+    setGameState(prev => ({ 
+        ...prev, 
+        grid: gridWithCompletions, 
+        revealsUsed: prev.revealsUsed + penaltyToAdd 
+    }));
+    setShowRevealMenu(false);
+    checkWinCondition(gridWithCompletions);
+  };
+
+  // Keyboard
   useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-        if (view !== 'GAME') return;
-        if (e.key === 'Backspace') handleDelete();
-        else if (e.key === 'Enter') handleNextClue(); // Or Tab
-        else if (e.key.length === 1 && /[a-zA-Z]/.test(e.key)) handleKeyPress(e.key.toUpperCase());
-        else if (e.key === 'ArrowUp') { setSelectedCell(prev => prev ? getPrevCell(prev.row, prev.col, Direction.DOWN) || prev : prev); setDirection(Direction.DOWN); }
-        else if (e.key === 'ArrowDown') { setSelectedCell(prev => prev ? getNextCell(prev.row, prev.col, Direction.DOWN) || prev : prev); setDirection(Direction.DOWN); }
-        else if (e.key === 'ArrowLeft') { setSelectedCell(prev => prev ? getPrevCell(prev.row, prev.col, Direction.ACROSS) || prev : prev); setDirection(Direction.ACROSS); }
-        else if (e.key === 'ArrowRight') { setSelectedCell(prev => prev ? getNextCell(prev.row, prev.col, Direction.ACROSS) || prev : prev); setDirection(Direction.ACROSS); }
+    const handleKeyDown = (e: KeyboardEvent) => {
+        if (gameState.status !== 'playing') return;
+        if (e.key.match(/^[a-zA-Z]$/)) handleInput(e.key.toUpperCase());
+        else if (e.key === 'Backspace') handleBackspace();
     };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [view, handleDelete, handleKeyPress, grid, selectedCell]);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [gameState, handleInput, handleBackspace]);
 
 
-  // --- Ambient Background Component ---
-  const AmbientBackground = () => (
-    <div className="absolute inset-0 overflow-hidden -z-10 bg-dark-950 bg-grid-pattern bg-[length:40px_40px]">
-       {/* Gradient Blobs */}
-       <div className="absolute top-[-20%] left-[-10%] w-[500px] h-[500px] bg-neon-purple/20 rounded-full blur-[100px] animate-float"></div>
-       <div className="absolute bottom-[-20%] right-[-10%] w-[600px] h-[600px] bg-neon-cyan/10 rounded-full blur-[120px] animate-float" style={{animationDelay: '2s'}}></div>
-       <div className="absolute top-[30%] left-[40%] w-[300px] h-[300px] bg-neon-pink/10 rounded-full blur-[80px] animate-float" style={{animationDelay: '5s'}}></div>
-    </div>
-  );
+  // AI and Hints
+  const getCurrentClue = () => {
+    if (!gameState.puzzle || !gameState.selectedCell) return null;
+    const { row, col } = gameState.selectedCell;
+    return gameState.puzzle.clues.find(c => {
+      if (gameState.direction === 'across') return c.row === row && c.col <= col && (c.col + c.answer.length) > col && c.direction === 'across';
+      if (gameState.direction === 'down') return c.col === col && c.row <= row && (c.row + c.answer.length) > row && c.direction === 'down';
+      return false;
+    });
+  };
+
+  const handleAskAI = async () => {
+      const clue = getCurrentClue();
+      if (!clue || isAiThinking) return;
+      setIsAiThinking(true);
+      
+      try {
+          // Construct simple pattern from grid
+          const hint = await getHintForCell(clue.text, "___");
+          setAiHint(hint);
+          setGameState(prev => ({ 
+              ...prev, 
+              hintsUsed: prev.hintsUsed + 1 
+          }));
+      } catch (e) {
+          setAiHint("Could not fetch hint.");
+      } finally {
+          setIsAiThinking(false);
+      }
+  };
 
   // --- Views ---
 
-  if (loading) {
-    return (
-      <div className="flex flex-col items-center justify-center h-screen bg-dark-950 text-neon-cyan gap-6 relative overflow-hidden">
-        <AmbientBackground />
-        <div className="relative">
-          <div className="w-20 h-20 border-4 border-t-neon-purple border-b-neon-cyan border-l-transparent border-r-transparent rounded-full animate-spin"></div>
-          <div className="absolute inset-0 flex items-center justify-center">
-            <div className="w-12 h-12 bg-neon-cyan/20 rounded-full blur-md animate-pulse"></div>
+  const Navbar = () => (
+      <nav className="fixed bottom-0 left-0 right-0 bg-slate-950/90 backdrop-blur-md border-t border-white/5 flex justify-around items-center p-2 pb-6 lg:pb-2 z-50">
+          <button onClick={() => setGameState(p => ({...p, view: 'home'}))} className={`p-2 flex flex-col items-center gap-1 ${gameState.view === 'home' ? 'text-fuchsia-400' : 'text-slate-500'}`}>
+              <Home size={24} />
+              <span className="text-[10px] uppercase font-bold tracking-wider">Home</span>
+          </button>
+          <button onClick={() => setGameState(p => ({...p, view: 'categories'}))} className={`p-2 flex flex-col items-center gap-1 ${gameState.view === 'categories' ? 'text-cyan-400' : 'text-slate-500'}`}>
+              <Grid size={24} />
+              <span className="text-[10px] uppercase font-bold tracking-wider">Topics</span>
+          </button>
+          <button onClick={() => setGameState(p => ({...p, view: 'profile'}))} className={`p-2 flex flex-col items-center gap-1 ${gameState.view === 'profile' ? 'text-amber-400' : 'text-slate-500'}`}>
+              <User size={24} />
+              <span className="text-[10px] uppercase font-bold tracking-wider">Stats</span>
+          </button>
+      </nav>
+  );
+
+  const HomeView = () => {
+      const isDailyDone = stats.lastDailyDate === new Date().toISOString().split('T')[0];
+      return (
+          <div className="flex flex-col gap-8 w-full max-w-lg mx-auto pb-24 animate-[fade-in_0.5s_ease-out]">
+             {/* Header Hero Section */}
+             <div className="flex flex-col items-center text-center pt-8 pb-4 relative">
+                {/* Decorative background glow */}
+                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-64 h-32 bg-fuchsia-500/20 blur-[80px] -z-10 rounded-full pointer-events-none"></div>
+
+                {/* Points Pill */}
+                <div className="flex items-center gap-2 mb-3">
+                   <div className="px-4 py-1.5 rounded-full bg-slate-900/80 border border-white/10 flex items-center gap-2 shadow-lg backdrop-blur-md hover:border-yellow-500/50 transition-colors cursor-default">
+                       <Star size={14} className="text-yellow-400 fill-yellow-400 animate-pulse" />
+                       <span className="font-mono font-bold text-yellow-100 text-sm tracking-widest">{stats.totalPoints.toLocaleString()} PTS</span>
+                   </div>
+                </div>
+
+                {/* Main Title */}
+                <h1 className="text-6xl font-black italic tracking-tighter text-transparent bg-clip-text bg-gradient-to-br from-white via-fuchsia-200 to-fuchsia-400 drop-shadow-[0_0_15px_rgba(217,70,239,0.5)] transform -rotate-2 hover:rotate-0 transition-transform duration-300">
+                    POPCROSS
+                </h1>
+                <p className="text-slate-400 text-xs font-bold uppercase tracking-[0.3em] mt-3 text-glow opacity-80">Infinite Culture Puzzles</p>
+             </div>
+
+             {/* Daily Card */}
+             <div className="glass-panel p-6 rounded-2xl relative overflow-hidden group">
+                 <div className="absolute inset-0 bg-gradient-to-br from-fuchsia-900/20 to-purple-900/20 group-hover:opacity-100 opacity-50 transition-opacity"></div>
+                 <h2 className="text-xs font-bold text-fuchsia-400 uppercase tracking-widest mb-1 relative z-10">Today's Feature</h2>
+                 <h3 className="text-2xl font-bold text-white mb-4 relative z-10">The Daily Mix</h3>
+                 
+                 <div className="flex gap-4 mb-6 relative z-10">
+                     <div className="flex flex-col">
+                         <span className="text-slate-400 text-xs uppercase font-bold">Streak</span>
+                         <span className="text-xl font-mono text-white flex items-center gap-1"><Zap size={16} className="text-yellow-400"/> {stats.currentStreak}</span>
+                     </div>
+                     <div className="flex flex-col border-l border-white/10 pl-4">
+                         <span className="text-slate-400 text-xs uppercase font-bold">Difficulty</span>
+                         <span className="text-xl font-mono text-white">Mixed</span>
+                     </div>
+                 </div>
+
+                 <button 
+                    onClick={() => startNewGame("Daily Mix", true)}
+                    disabled={isDailyDone}
+                    className={`w-full py-4 rounded-xl font-black text-sm uppercase tracking-widest flex items-center justify-center gap-2 transition-all relative z-10
+                    ${isDailyDone 
+                        ? 'bg-slate-800 text-slate-500 cursor-not-allowed border border-white/5' 
+                        : 'bg-white text-slate-900 hover:bg-fuchsia-50 hover:text-fuchsia-900 hover:shadow-[0_0_20px_rgba(217,70,239,0.4)]'
+                    }`}
+                 >
+                    {isDailyDone ? "Completed" : "Play Daily Puzzle"}
+                 </button>
+             </div>
+
+             {/* Quick Actions */}
+             <div>
+                <h3 className="text-sm font-bold text-slate-500 uppercase tracking-widest mb-3">Quick Play</h3>
+                <div className="grid grid-cols-2 gap-3">
+                    <button onClick={() => startNewGame('Movies')} className="p-4 bg-slate-900/50 border border-white/5 rounded-xl flex items-center gap-3 hover:border-pink-500/50 transition-colors group">
+                        <div className="p-2 bg-pink-500/20 rounded-lg text-pink-400 group-hover:scale-110 transition-transform"><Clapperboard size={20}/></div>
+                        <span className="font-bold">Movies</span>
+                    </button>
+                    <button onClick={() => startNewGame('Music')} className="p-4 bg-slate-900/50 border border-white/5 rounded-xl flex items-center gap-3 hover:border-purple-500/50 transition-colors group">
+                        <div className="p-2 bg-purple-500/20 rounded-lg text-purple-400 group-hover:scale-110 transition-transform"><Music size={20}/></div>
+                        <span className="font-bold">Music</span>
+                    </button>
+                    {savedGameExists && (
+                         <button onClick={() => { setGameState(loadGameState() || gameState); }} className="col-span-2 p-4 bg-gradient-to-r from-slate-800 to-slate-900 border border-fuchsia-500/30 rounded-xl flex justify-center items-center gap-3 hover:border-fuchsia-500 transition-colors">
+                            <span className="font-bold text-fuchsia-300">Resume Last Session</span>
+                        </button>
+                    )}
+                </div>
+             </div>
           </div>
-        </div>
-        <p className="font-mono text-lg animate-pulse tracking-widest text-glow">GENERATING PUZZLE...</p>
-      </div>
-    );
+      );
   }
 
-  if (view === 'HOME') {
-    return (
-      <div className="h-screen text-white flex flex-col relative overflow-hidden">
-        <AmbientBackground />
-        
-        {/* Header */}
-        <header className="p-5 flex justify-between items-center border-b border-white/5 bg-dark-950/60 backdrop-blur-md sticky top-0 z-20">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-gradient-to-br from-neon-purple to-neon-cyan rounded-xl flex items-center justify-center font-black text-black text-xl shadow-[0_0_15px_rgba(114,9,183,0.5)] transform hover:rotate-6 transition-transform">P</div>
-            <div>
-              <h1 className="text-2xl font-bold font-sans tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-white to-gray-400">POPCROSS</h1>
-              <p className="text-[10px] font-mono text-neon-cyan uppercase tracking-widest leading-none">Infinite Culture Puzzles</p>
-            </div>
-          </div>
-          <div className="flex items-center gap-4">
-             <div className="flex items-center gap-1.5 text-neon-yellow font-mono text-sm bg-dark-800/80 px-3 py-1.5 rounded-full border border-neon-yellow/20 shadow-[0_0_10px_rgba(255,214,10,0.2)]">
-               {ICONS.Star} {userStats.stars}
-             </div>
-             <div className="w-10 h-10 rounded-full bg-dark-800 border-2 border-dark-700 overflow-hidden hover:border-neon-purple transition-colors">
-                <img src="https://picsum.photos/100/100" alt="Avatar" className="w-full h-full object-cover" />
-             </div>
-          </div>
-        </header>
-
-        <main className="flex-1 p-4 sm:p-6 overflow-y-auto pb-24 max-w-4xl mx-auto w-full z-10 custom-scrollbar">
-          
-          {/* Resume Game Card (Conditionally Rendered) */}
-          {hasSavedGame && (
-             <section className="mb-8 relative group cursor-pointer animate-in slide-in-from-top-4 duration-500" onClick={resumeGame}>
-                <div className="absolute inset-0 bg-gradient-to-r from-orange-500 to-red-600 rounded-3xl blur opacity-20 group-hover:opacity-40 transition-opacity duration-500"></div>
-                <div className="relative bg-dark-900/90 backdrop-blur-xl border border-orange-500/30 rounded-3xl p-6 flex justify-between items-center overflow-hidden">
-                    <div className="absolute top-0 right-0 w-32 h-full bg-gradient-to-l from-orange-500/10 to-transparent"></div>
-                    <div>
-                         <div className="flex items-center gap-2 mb-2 text-orange-400">
-                            <RotateCcw className="w-4 h-4 animate-spin-slow" />
-                            <span className="text-[10px] font-bold uppercase tracking-wider">Unfinished Business</span>
-                         </div>
-                         <h2 className="text-2xl font-bold text-white mb-1">Resume Last Game</h2>
-                         <p className="text-gray-400 text-xs">Pick up exactly where you left off.</p>
-                    </div>
-                    <div className="flex items-center gap-3 relative z-10">
-                        <button 
-                            onClick={discardSavedGame} 
-                            className="p-3 rounded-xl hover:bg-white/10 text-gray-400 hover:text-red-400 transition-colors"
-                            title="Discard Save"
-                        >
-                            <Trash2 className="w-5 h-5" />
-                        </button>
-                        <button className="bg-orange-500 text-white p-4 rounded-xl shadow-[0_0_15px_rgba(249,115,22,0.4)] group-hover:scale-105 transition-transform">
-                            <Play className="w-5 h-5 fill-white" />
-                        </button>
-                    </div>
-                </div>
-             </section>
-          )}
-
-          {/* Daily Challenge Card */}
-          <section className="mb-10 relative group cursor-pointer" onClick={() => dailyCategory && startPuzzle(dailyCategory.name, 'Medium', true)}>
-            <div className="absolute inset-0 bg-gradient-to-r from-neon-purple via-neon-pink to-neon-yellow rounded-3xl blur opacity-30 group-hover:opacity-60 transition-opacity duration-500"></div>
-            <div className="relative bg-dark-900/80 backdrop-blur-xl border border-white/10 rounded-3xl p-6 sm:p-8 flex flex-col gap-6 overflow-hidden">
-               {/* Decorative background stripes */}
-               <div className="absolute top-0 right-0 w-64 h-full bg-gradient-to-l from-neon-purple/10 to-transparent skew-x-12"></div>
-
-               <div className="flex justify-between items-start relative z-10">
-                 <div>
-                   <div className="flex items-center gap-2 mb-2">
-                     <span className="text-[10px] font-bold bg-gradient-to-r from-neon-purple to-neon-pink text-white px-2 py-0.5 rounded uppercase tracking-wider">Daily Drop</span>
-                     <span className="text-[10px] font-mono text-neon-cyan animate-pulse">LIVE NOW</span>
-                   </div>
-                   <h2 className="text-4xl sm:text-5xl font-black italic tracking-tighter text-white drop-shadow-lg leading-none">
-                     {dailyCategory ? dailyCategory.name.toUpperCase() : "DAILY PUZZLE"}
-                   </h2>
-                   <p className="text-gray-300 text-sm mt-3 max-w-xs font-light">Today's curated mix. Complete it to build your streak!</p>
-                 </div>
-                 <div className="hidden sm:block">
-                   <CalendarCheck className="w-16 h-16 text-neon-pink animate-pulse-fast drop-shadow-[0_0_10px_rgba(247,37,133,0.5)]" />
-                 </div>
-               </div>
-               
-               <button className="relative z-10 w-full sm:w-auto bg-white text-black font-black py-4 px-8 rounded-xl flex items-center justify-center gap-2 hover:scale-[1.02] active:scale-95 transition-all shadow-[0_0_20px_rgba(255,255,255,0.3)]">
-                 <Play className="w-5 h-5 fill-black" /> PLAY DAILY
-               </button>
-            </div>
-          </section>
-
-          {/* Stats Teaser */}
-          <section className="mb-10 grid grid-cols-2 gap-4">
-             <div className="glass-card p-4 rounded-2xl flex flex-col items-center justify-center text-center group hover:bg-white/5 transition-colors">
-               <h4 className="font-mono text-xs text-gray-400 uppercase tracking-widest mb-1">Current Streak</h4>
-               <p className="text-neon-cyan font-black text-3xl group-hover:scale-110 transition-transform">{userStats.streak} <span className="text-lg">Days</span></p>
-             </div>
-             <div className="glass-card p-4 rounded-2xl flex flex-col items-center justify-center text-center group hover:bg-white/5 transition-colors">
-               <h4 className="font-mono text-xs text-gray-400 uppercase tracking-widest mb-1">XP Level</h4>
-               <p className="text-neon-purple font-black text-3xl group-hover:scale-110 transition-transform">{userStats.level}</p>
-             </div>
-          </section>
-
-          {/* Categories Grid */}
-          <section>
-            <div className="flex items-center gap-3 mb-6">
-               <div className="p-2 bg-dark-800 rounded-lg text-neon-green">{ICONS.Grid}</div>
-               <h3 className="text-xl font-bold tracking-tight">Browse Categories</h3>
-            </div>
-            
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
-              {CATEGORIES.map(cat => (
-                <div 
-                  key={cat.id} 
-                  onClick={() => setSelectedCategory(cat)}
-                  className={`glass-card p-5 rounded-2xl cursor-pointer group hover:-translate-y-1 transition-all duration-300 relative overflow-hidden`}
-                >
-                   {/* Hover Gradient Background */}
-                   <div className={`absolute inset-0 bg-gradient-to-br from-transparent to-${cat.color.split(' ')[0].replace('text-', '')}/10 opacity-0 group-hover:opacity-100 transition-opacity duration-300`}></div>
-                   
-                   <div className={`${cat.color} mb-4 p-3 bg-dark-900/50 rounded-xl w-fit group-hover:scale-110 transition-transform shadow-[0_0_10px_rgba(0,0,0,0.5)]`}>
-                      {cat.icon}
-                   </div>
-                   <h4 className="font-bold text-lg leading-none mb-1 group-hover:text-white transition-colors">{cat.name}</h4>
-                   <p className="text-[10px] text-gray-500 uppercase tracking-wider font-mono">{cat.description}</p>
-                </div>
+  const CategoriesView = () => (
+      <div className="flex flex-col gap-6 w-full max-w-2xl mx-auto pb-24 animate-[fade-in_0.5s_ease-out]">
+          <h1 className="text-3xl font-black italic tracking-tighter text-white mb-2">CHANNELS</h1>
+          <div className="flex items-center gap-2 mb-4 overflow-x-auto hide-scrollbar pb-2">
+              {['Easy', 'Medium', 'Hard', 'Expert'].map(d => (
+                  <button 
+                    key={d} 
+                    onClick={() => setGameState(p => ({...p, settings: {...p.settings, difficulty: d as any}}))}
+                    className={`px-4 py-2 rounded-full text-xs font-bold uppercase tracking-wider border whitespace-nowrap transition-all flex items-center gap-2
+                    ${gameState.settings.difficulty === d ? 'bg-white text-black border-white' : 'bg-transparent text-slate-500 border-slate-800 hover:border-slate-600'}`}
+                  >
+                      <span>{d}</span>
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded ${gameState.settings.difficulty === d ? 'bg-black/10 text-black' : 'bg-slate-800 text-slate-400'}`}>
+                        {POINTS_BY_DIFFICULTY[d]}pts
+                      </span>
+                  </button>
               ))}
-            </div>
-          </section>
-
-        </main>
-        
-        {/* Difficulty & Region Selection Modal */}
-        {selectedCategory && (
-            <div className="absolute inset-0 z-50 bg-black/60 backdrop-blur-xl flex items-center justify-center p-4">
-                <div className="bg-dark-900 border border-white/10 rounded-3xl w-full max-w-sm p-8 relative shadow-[0_0_100px_rgba(114,9,183,0.3)] animate-in fade-in zoom-in duration-300 overflow-hidden">
-                    {/* Background blob */}
-                    <div className="absolute -top-20 -right-20 w-64 h-64 bg-neon-purple/20 rounded-full blur-[60px] pointer-events-none"></div>
-
-                    <button 
-                        onClick={() => setSelectedCategory(null)} 
-                        className="absolute top-6 right-6 text-gray-500 hover:text-white transition-colors bg-dark-800 p-2 rounded-full hover:bg-dark-700"
-                    >
-                        <X className="w-5 h-5" />
-                    </button>
-                    
-                    <div className="mb-8 relative z-10">
-                        <div className={`inline-block p-3 rounded-2xl bg-dark-800 mb-4 ${selectedCategory.color} shadow-lg`}>
-                            {selectedCategory.icon}
-                        </div>
-                        <h3 className="text-3xl font-black text-white leading-none tracking-tight">{selectedCategory.name}</h3>
-                        <p className="text-gray-400 text-sm mt-2 font-light">Customize your game setup.</p>
-                    </div>
-
-                    {/* Region Selector */}
-                    <div className="mb-6">
-                        <span className="text-gray-500 text-[10px] uppercase font-bold tracking-widest mb-3 block pl-1">Region Preference</span>
-                        <div className="flex bg-dark-950 p-1.5 gap-2 rounded-xl border border-white/5">
-                            {(['USA', 'UK', 'Mix'] as Region[]).map(r => (
-                                <button
-                                    key={r}
-                                    onClick={() => setPuzzleRegion(r)}
-                                    className={`flex-1 py-3 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
-                                        puzzleRegion === r 
-                                        ? 'bg-dark-800 text-white shadow-lg border border-white/10' 
-                                        : 'text-gray-500 hover:text-gray-300 hover:bg-white/5'
-                                    }`}
-                                >
-                                    {r === 'Mix' ? <Globe className="w-3.5 h-3.5" /> : (r === 'USA' ? '🇺🇸' : '🇬🇧')} {r === 'Mix' ? 'Global' : r}
-                                </button>
-                            ))}
-                        </div>
-                    </div>
-
-                    <div className="flex flex-col gap-3">
-                        <span className="text-gray-500 text-[10px] uppercase font-bold tracking-widest mb-1 pl-1">Select Difficulty</span>
-                        
-                        {[
-                          { id: 'Easy', color: 'neon-cyan', desc: '10-12 Words', sub: 'Quick & Breezy' },
-                          { id: 'Medium', color: 'neon-yellow', desc: '18-20 Words', sub: 'The Standard' },
-                          { id: 'Hard', color: 'neon-pink', desc: '25-30 Words', sub: 'Brain Burner' }
-                        ].map((level) => (
-                           <button 
-                            key={level.id}
-                            onClick={() => { startPuzzle(selectedCategory.name, level.id as any); setSelectedCategory(null); }}
-                            className={`group relative overflow-hidden bg-dark-800 hover:bg-dark-700 border border-white/5 hover:border-${level.color}/50 p-4 rounded-xl text-left transition-all duration-300`}
-                        >
-                            <div className={`absolute left-0 top-0 bottom-0 w-1 bg-${level.color} opacity-50 group-hover:opacity-100 transition-opacity`}></div>
-                            <div className="flex justify-between items-center mb-1 pl-2">
-                                <span className={`font-bold text-white text-lg group-hover:text-${level.color} transition-colors`}>{level.id}</span>
-                                <span className="text-[10px] bg-dark-950 px-2 py-1 rounded text-gray-400 font-mono border border-white/5">{level.desc}</span>
-                            </div>
-                            <div className="text-xs text-gray-500 pl-2">{level.sub}</div>
-                        </button>
-                        ))}
-                    </div>
-                </div>
-            </div>
-        )}
-      </div>
-    );
-  }
-
-  if (view === 'GAME' && puzzle) {
-    const currentWord = getCurrentWord();
-    const currentWordIndex = puzzle.words.findIndex(w => w.id === currentWord?.id);
-
-    return (
-      <div className="h-screen bg-dark-950 text-white flex flex-col relative overflow-hidden">
-        <AmbientBackground />
-        
-        {/* Game Header */}
-        <div className="flex justify-between items-center px-4 py-3 bg-dark-900/80 backdrop-blur-md border-b border-white/5 z-20 shrink-0">
-           <button onClick={() => setView('HOME')} className="p-2 hover:bg-white/10 rounded-full transition-colors text-gray-400 hover:text-white">
-             <ArrowLeft className="w-5 h-5" />
-           </button>
-           
-           <div className="flex flex-col items-center">
-             <div className="flex items-center gap-2 text-neon-cyan font-mono text-sm font-bold bg-dark-950/50 px-3 py-1 rounded-full border border-neon-cyan/20 shadow-[0_0_10px_rgba(76,201,240,0.2)]">
-                <Timer className="w-4 h-4" /> {formatTime(elapsedTime)}
-             </div>
-             <div className="text-[10px] text-gray-500 uppercase tracking-widest mt-1 font-semibold">{puzzle.difficulty} • {puzzleRegion === 'Mix' ? 'Global' : puzzleRegion}</div>
-           </div>
-
-           <div className="flex items-center gap-2">
-                {/* Visual Indicator that game is saved */}
-                <div className="p-2 rounded-full bg-dark-950/50 border border-white/5 text-neon-green/50" title="Progress Saved">
-                    <Save className="w-4 h-4" />
-                </div>
-                <button className="flex items-center gap-1 text-neon-yellow font-bold text-sm bg-dark-950/50 px-3 py-1.5 rounded-full border border-neon-yellow/20">
-                    {ICONS.Star} {userStats.stars}
-                </button>
-           </div>
-        </div>
-
-        {/* Responsive Content Container */}
-        <div className="flex-1 flex flex-col lg:flex-row overflow-hidden relative z-10">
-            
-            {/* Grid Area - Centered and fills available space */}
-            <div className="flex-1 overflow-auto flex items-center justify-center p-4 relative no-scrollbar">
-                <Grid 
-                    grid={grid} 
-                    width={puzzle.width} 
-                    height={puzzle.height} 
-                    selectedCell={selectedCell}
-                    selectedDirection={direction}
-                    onCellClick={handleCellClick}
-                />
-            </div>
-
-            {/* Controls Area (Clue + Keyboard) */}
-            {/* Mobile: Bottom Sheet, Tablet/Desktop: Right Sidebar */}
-            <div className="shrink-0 z-20 w-full lg:w-[420px] bg-dark-950/80 backdrop-blur-xl border-t lg:border-t-0 lg:border-l border-white/10 flex flex-col justify-end lg:justify-center pb-safe">
-                <div className="lg:mb-auto"></div> {/* Spacer for desktop vertical centering */}
-                
-                <ClueBar 
-                    clue={currentWord?.clue || ""} 
-                    direction={currentWord?.direction || Direction.ACROSS} 
-                    clueNumber={currentWordIndex + 1}
-                    onNext={handleNextClue}
-                    onPrev={handlePrevClue}
-                />
-                
-                <Keyboard 
-                    onKeyPress={handleKeyPress} 
-                    onDelete={handleDelete}
-                    onEnter={handleNextClue}
-                    onRevealLetter={handleRevealLetter}
-                    onRevealWord={handleRevealWord}
-                    onCheck={handleCheckPuzzle}
-                    userStars={userStats.stars}
-                />
-                
-                <div className="lg:mb-auto"></div> {/* Spacer for desktop vertical centering */}
-            </div>
-        </div>
-
-        {/* Win Modal Overlay */}
-        {solved && gameResult && (
-          <div className="absolute inset-0 z-50 bg-black/80 backdrop-blur-xl flex items-center justify-center p-4">
-            <div className="bg-dark-900 border border-neon-green/30 rounded-3xl w-full max-w-sm overflow-hidden shadow-[0_0_80px_rgba(0,245,212,0.15)] flex flex-col animate-in zoom-in duration-300 relative">
-               
-               {/* Confetti effect placeholder or gradient glow */}
-               <div className="absolute top-0 left-0 right-0 h-32 bg-gradient-to-b from-neon-green/20 to-transparent pointer-events-none"></div>
-
-               {/* Modal Header */}
-               <div className="p-8 text-center relative z-10">
-                   <div className="w-20 h-20 bg-gradient-to-br from-neon-green to-emerald-600 rounded-full flex items-center justify-center mx-auto mb-4 shadow-[0_0_30px_rgba(0,245,212,0.4)] animate-bounce">
-                        <Award className="w-10 h-10 text-black" />
-                   </div>
-                   <h2 className="text-3xl font-black text-white uppercase tracking-wider italic transform -skew-x-6">Mission<br/>Complete</h2>
-                   <p className="text-gray-400 text-sm mt-2 font-mono">{puzzle.theme}</p>
-               </div>
-
-               {/* Challenges List */}
-               <div className="px-8 pb-4 space-y-3">
-                    {gameResult.challenges.map((challenge, idx) => (
-                        <div key={idx} className="flex justify-between items-center p-3 rounded-xl bg-dark-950/50 border border-white/5">
-                            <div className="flex items-center gap-3">
-                                {challenge.success ? (
-                                    <CheckCircle2 className="w-5 h-5 text-neon-green" />
-                                ) : (
-                                    <XCircle className="w-5 h-5 text-gray-700" />
-                                )}
-                                <span className={`text-sm font-semibold ${challenge.success ? 'text-white' : 'text-gray-500'}`}>
-                                    {challenge.label}
-                                </span>
-                            </div>
-                            <span className={`text-xs font-mono font-bold ${challenge.success ? 'text-neon-cyan' : 'text-gray-700'}`}>
-                                {challenge.success ? challenge.reward : '---'}
-                            </span>
-                        </div>
-                    ))}
-               </div>
-
-               {/* Level Progress */}
-               <div className="px-8 py-4 bg-dark-950/30">
-                    <div className="flex justify-between text-xs font-bold text-gray-400 mb-2 uppercase tracking-wider">
-                        <span>Lvl {userStats.level}</span>
-                        <span>{Math.floor((userStats.xp % 1000) / 10)}%</span>
-                    </div>
-                    <div className="h-3 bg-dark-800 rounded-full overflow-hidden border border-white/5">
-                        <div 
-                            className="h-full bg-gradient-to-r from-neon-purple to-neon-cyan shadow-[0_0_10px_rgba(114,9,183,0.8)]"
-                            style={{ width: `${(userStats.xp % 1000) / 10}%` }}
-                        ></div>
-                    </div>
-                    <div className="text-center mt-2 text-[10px] text-gray-600 font-mono">
-                        {1000 - (userStats.xp % 1000)} XP to next level
-                    </div>
-               </div>
-
-               {/* Actions */}
-               <div className="p-6 flex gap-3 bg-dark-900 border-t border-white/5">
-                    <button onClick={() => setView('HOME')} className="flex-1 py-4 rounded-xl bg-dark-800 text-gray-300 font-bold text-sm hover:bg-dark-700 hover:text-white transition-colors border border-white/5">
-                        Menu
-                    </button>
-                    <button onClick={() => startPuzzle(puzzle.theme, 'Hard')} className="flex-1 py-4 rounded-xl bg-white text-black font-black text-sm hover:bg-neon-cyan transition-colors flex items-center justify-center gap-2 shadow-[0_0_20px_rgba(255,255,255,0.2)]">
-                        <RotateCcw className="w-4 h-4" /> Next Level
-                    </button>
-               </div>
-            </div>
           </div>
-        )}
+          
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+              {CATEGORIES.map(cat => (
+                  <button 
+                    key={cat.id}
+                    onClick={() => startNewGame(cat.id)}
+                    className="glass-panel p-4 rounded-xl flex flex-col items-start gap-3 hover:bg-white/5 transition-all group text-left h-32 relative overflow-hidden"
+                  >
+                      <div className={`absolute -right-4 -bottom-4 opacity-10 group-hover:opacity-20 transition-opacity scale-150 ${cat.color}`}>{cat.icon}</div>
+                      <div className={`p-2 rounded-lg bg-black/40 ${cat.color}`}>{cat.icon}</div>
+                      <div>
+                          <div className="font-bold text-lg leading-none mb-1">{cat.label}</div>
+                          <div className="text-[10px] text-slate-500 font-bold uppercase tracking-wide">{cat.description}</div>
+                      </div>
+                  </button>
+              ))}
+          </div>
       </div>
-    );
-  }
+  );
 
-  return null;
+  const ProfileView = () => (
+      <div className="flex flex-col gap-6 w-full max-w-lg mx-auto pb-24 animate-[fade-in_0.5s_ease-out]">
+           <div className="text-center mb-6">
+                <div className="w-24 h-24 mx-auto bg-gradient-to-br from-fuchsia-500 to-cyan-500 rounded-full p-1 mb-4 shadow-xl shadow-fuchsia-500/20">
+                    <div className="w-full h-full bg-slate-950 rounded-full flex items-center justify-center">
+                        <User size={40} className="text-white" />
+                    </div>
+                </div>
+                <h1 className="text-2xl font-bold text-white mb-1">Pop Culture Fan</h1>
+                <p className="text-slate-400 text-sm font-mono">Level {stats.level}</p>
+           </div>
+
+           {/* XP Bar */}
+           <div className="glass-panel p-4 rounded-xl">
+               <div className="flex justify-between text-xs font-bold text-slate-400 mb-2 uppercase tracking-wider">
+                   <span>XP Progress</span>
+                   <span>{stats.xp} / {stats.xpToNextLevel}</span>
+               </div>
+               <div className="h-3 bg-slate-800 rounded-full overflow-hidden">
+                   <div 
+                    className="h-full bg-gradient-to-r from-fuchsia-500 to-cyan-500" 
+                    style={{ width: `${Math.min(100, (stats.xp / stats.xpToNextLevel) * 100)}%` }}
+                   ></div>
+               </div>
+           </div>
+
+           {/* Stats Grid */}
+           <div className="grid grid-cols-2 gap-3">
+               <div className="glass-panel p-4 rounded-xl flex flex-col items-center">
+                   <Trophy size={20} className="text-yellow-400 mb-2"/>
+                   <span className="text-2xl font-black text-white">{stats.gamesWon}</span>
+                   <span className="text-[10px] uppercase font-bold text-slate-500">Wins</span>
+               </div>
+               <div className="glass-panel p-4 rounded-xl flex flex-col items-center">
+                   <Zap size={20} className="text-cyan-400 mb-2"/>
+                   <span className="text-2xl font-black text-white">{stats.maxStreak}</span>
+                   <span className="text-[10px] uppercase font-bold text-slate-500">Max Streak</span>
+               </div>
+           </div>
+
+           {/* Badges */}
+           <div>
+               <h3 className="text-sm font-bold text-slate-500 uppercase tracking-widest mb-3">Badges</h3>
+               <div className="grid grid-cols-4 gap-2">
+                   {stats.badges.map(badge => (
+                       <div key={badge.id} className={`aspect-square rounded-xl flex items-center justify-center text-2xl border ${badge.unlocked ? 'bg-slate-800 border-white/20' : 'bg-slate-900/50 border-white/5 opacity-30 grayscale'}`}>
+                           {badge.icon}
+                       </div>
+                   ))}
+               </div>
+           </div>
+      </div>
+  );
+
+  // --- Main Render ---
+
+  return (
+    <div className="min-h-screen flex flex-col relative z-10 px-4 pt-4">
+        
+        {/* Main Content Area */}
+        <div className="flex-1 w-full max-w-5xl mx-auto">
+            
+            {gameState.view === 'home' && <HomeView />}
+            {gameState.view === 'categories' && <CategoriesView />}
+            {gameState.view === 'profile' && <ProfileView />}
+
+            {gameState.view === 'game' && (
+                <div className="h-full flex flex-col animate-[fade-in_0.3s_ease-out]">
+                    {gameState.status === 'generating' ? (
+                        <div className="flex-1 flex flex-col items-center justify-center text-center">
+                             <Loader2 size={48} className="animate-spin text-fuchsia-500 mb-4" />
+                             <h2 className="text-2xl font-black text-white mb-2">GENERATING PUZZLE</h2>
+                             <p className="text-slate-400 text-sm max-w-xs">Building a {gameState.settings.difficulty} {gameState.settings.region} grid...</p>
+                        </div>
+                    ) : gameState.status === 'completed' ? (
+                         <div className="flex-1 flex flex-col items-center justify-center text-center">
+                             <div className="relative mb-8">
+                                <div className="absolute inset-0 bg-fuchsia-500 blur-[80px] opacity-40"></div>
+                                <Medal size={80} className="relative text-yellow-400 drop-shadow-lg" />
+                             </div>
+                             <h1 className="text-4xl font-black text-white mb-2 italic">CLEARED!</h1>
+                             <div className="text-6xl font-mono font-bold text-transparent bg-clip-text bg-gradient-to-br from-white to-slate-400 mb-8">
+                                 {gameState.score}
+                             </div>
+                             <button 
+                                onClick={() => setGameState(p => ({...p, view: 'home', status: 'idle'}))}
+                                className="px-8 py-4 bg-white text-black font-black uppercase tracking-widest rounded-xl hover:scale-105 transition-transform"
+                             >
+                                 Continue
+                             </button>
+                         </div>
+                    ) : (
+                        <div className="flex flex-col lg:flex-row h-full gap-4 pb-4">
+                            {/* Game Header Mobile */}
+                            <div className="flex justify-between items-center lg:hidden">
+                                <button onClick={() => setGameState(p => ({...p, view: 'home', status: 'idle'}))} className="text-slate-400 hover:text-white"><Home size={20}/></button>
+                                <span className="text-xs font-bold text-slate-500 uppercase tracking-widest">{gameState.puzzle?.theme}</span>
+                                <div className="font-mono text-fuchsia-400 text-sm">{Math.floor(gameState.timer/60)}:{(gameState.timer%60).toString().padStart(2,'0')}</div>
+                            </div>
+
+                            {/* Board Area */}
+                            <div className="flex-1 flex items-center justify-center min-h-[40vh]">
+                                <PuzzleGrid grid={gameState.grid} onCellClick={handleCellClick} />
+                            </div>
+
+                            {/* Controls Area */}
+                            <div className="lg:w-[380px] flex flex-col gap-3 h-full overflow-hidden">
+                                {/* Desktop Header */}
+                                <div className="hidden lg:flex items-center justify-between px-1 pb-2 border-b border-white/5 mb-2">
+                                    <button 
+                                        onClick={() => setGameState(p => ({...p, view: 'home', status: 'idle'}))}
+                                        className="flex items-center gap-2 text-slate-500 hover:text-white transition-colors hover:bg-white/5 rounded-lg px-2 py-1"
+                                    >
+                                        <Home size={18} />
+                                        <span className="text-xs font-bold uppercase tracking-widest">Home</span>
+                                    </button>
+                                    <div className="flex flex-col items-end">
+                                        <span className="text-[10px] font-bold text-slate-600 uppercase tracking-widest leading-none mb-1">{gameState.puzzle?.theme}</span>
+                                        <div className="font-mono text-fuchsia-400 text-sm leading-none">
+                                            {Math.floor(gameState.timer/60)}:{(gameState.timer%60).toString().padStart(2,'0')}
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Clue Card */}
+                                <div className="glass-panel p-4 rounded-xl min-h-[100px] flex flex-col justify-center relative">
+                                    <div className="flex justify-between items-start mb-2">
+                                        <span className="text-[10px] uppercase font-black text-fuchsia-500 tracking-widest">{gameState.direction}</span>
+                                        {/* Audio Clue Toggle (Visual Only) */}
+                                        <button 
+                                            onClick={() => setGameState(p => ({...p, settings: {...p.settings, soundEnabled: !p.settings.soundEnabled}}))}
+                                            className="text-slate-600 hover:text-white transition-colors"
+                                        >
+                                            {gameState.settings.soundEnabled ? <Volume2 size={14}/> : <VolumeX size={14}/>}
+                                        </button>
+                                    </div>
+                                    <div className="text-lg font-medium leading-snug text-white">
+                                        {getCurrentClue() ? (
+                                            <>
+                                                <span className="font-mono text-slate-500 mr-2">{getCurrentClue()?.number}</span>
+                                                {getCurrentClue()?.text}
+                                            </>
+                                        ) : <span className="text-slate-500 italic">Select a cell to start</span>}
+                                    </div>
+                                    
+                                    {/* AI Hint Overlay */}
+                                    {aiHint && (
+                                        <div className="absolute inset-0 bg-slate-900/95 backdrop-blur-sm p-4 flex items-center justify-between z-20">
+                                            <div className="flex items-center gap-3">
+                                                <Sparkles size={16} className="text-cyan-400"/>
+                                                <p className="text-sm text-cyan-200 italic">"{aiHint}"</p>
+                                            </div>
+                                            <button onClick={() => setAiHint(null)} className="p-1 hover:bg-white/10 rounded">✕</button>
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* Main Controls (Hint, Check, Reveal) */}
+                                <div className="flex gap-2">
+                                    {showRevealMenu ? (
+                                        <>
+                                            <button 
+                                                onClick={() => handleReveal('cell')}
+                                                className="flex-1 bg-yellow-900/40 border border-yellow-500/30 py-3 rounded-lg flex justify-center items-center gap-1 text-yellow-400 text-[10px] font-bold uppercase tracking-wider hover:bg-yellow-900/60"
+                                            >
+                                                <TypeIcon size={14} /> Letter (-{REVEAL_LETTER_PENALTY})
+                                            </button>
+                                            <button 
+                                                onClick={() => handleReveal('word')}
+                                                className="flex-1 bg-yellow-900/40 border border-yellow-500/30 py-3 rounded-lg flex justify-center items-center gap-1 text-yellow-400 text-[10px] font-bold uppercase tracking-wider hover:bg-yellow-900/60"
+                                            >
+                                                <Hash size={14} /> Word (-{REVEAL_WORD_PENALTY})
+                                            </button>
+                                            <button onClick={() => setShowRevealMenu(false)} className="px-3 bg-slate-800 rounded-lg text-slate-400">✕</button>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <button 
+                                                onClick={handleAskAI} 
+                                                disabled={isAiThinking}
+                                                className="flex-1 bg-cyan-900/20 border border-cyan-500/20 py-3 rounded-lg flex justify-center items-center gap-2 text-cyan-400 text-xs font-bold uppercase tracking-wider hover:bg-cyan-900/40"
+                                            >
+                                                {isAiThinking ? <Loader2 size={14} className="animate-spin"/> : <Sparkles size={14}/>} Hint
+                                            </button>
+                                            <button 
+                                                onClick={() => setShowRevealMenu(true)}
+                                                className="flex-1 bg-yellow-900/20 border border-yellow-500/20 py-3 rounded-lg flex justify-center items-center gap-2 text-yellow-400 text-xs font-bold uppercase tracking-wider hover:bg-yellow-900/40"
+                                            >
+                                                <EyeIcon size={14}/> Reveal
+                                            </button>
+                                            <button 
+                                                onClick={handleCheckPuzzle}
+                                                className="flex-1 bg-slate-800 border border-slate-700 py-3 rounded-lg flex justify-center items-center gap-2 text-slate-400 text-xs font-bold uppercase tracking-wider hover:bg-slate-700 hover:text-white"
+                                            >
+                                                <Check size={14}/> Check
+                                            </button>
+                                        </>
+                                    )}
+                                </div>
+
+                                <div className="mt-auto">
+                                    <VirtualKeyboard onKeyPress={handleInput} onDelete={handleBackspace} />
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            )}
+        </div>
+
+        {/* Navigation Bar (Only show if not in game or if game is idle/completed) */}
+        {gameState.view !== 'game' && <Navbar />}
+    </div>
+  );
 }
