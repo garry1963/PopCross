@@ -11,21 +11,24 @@ export const PuzzleGrid: React.FC<PuzzleGridProps> = ({ grid, onCellClick }) => 
   
   // Dynamic text sizing based on grid dimension
   const getTextSize = () => {
-    if (size <= 5) return 'text-3xl';
-    if (size <= 7) return 'text-2xl';
-    if (size <= 10) return 'text-xl';
-    return 'text-sm';
+    if (size <= 8) return 'text-2xl sm:text-3xl'; // Easy
+    if (size <= 12) return 'text-xl sm:text-2xl'; // Medium/Hard
+    return 'text-base sm:text-xl'; // Expert
   };
 
   const textSize = getTextSize();
 
+  // Dynamic max-width calculation to ensure cells don't get too cramped
+  // Aim for ~50px per cell on desktop, with a reasonable minimum
+  const maxWidth = Math.max(400, size * 50);
+
   return (
     <div className="flex justify-center items-center w-full h-full py-4 px-2">
       <div 
-        className="grid gap-[2px] p-2 bg-slate-950 rounded-xl border border-slate-800 shadow-2xl"
+        className="grid gap-[1px] sm:gap-[2px] p-2 bg-slate-950 rounded-xl border border-slate-800 shadow-2xl transition-all duration-300"
         style={{
           gridTemplateColumns: `repeat(${size}, minmax(0, 1fr))`,
-          maxWidth: size > 10 ? '600px' : size > 7 ? '550px' : '400px',
+          maxWidth: `${maxWidth}px`,
           width: '100%',
           aspectRatio: '1/1'
         }}
@@ -54,11 +57,19 @@ export const PuzzleGrid: React.FC<PuzzleGridProps> = ({ grid, onCellClick }) => 
             let activeGlow = '';
             
             if (isActive) {
-                // Active Cursor Cell - Super Bright & Pop
-                bgClass = 'bg-fuchsia-500';
-                textClass = 'text-white font-black';
-                borderClass = 'border-fuchsia-300';
-                activeGlow = 'shadow-[0_0_20px_rgba(217,70,239,0.7)] z-30 scale-110 ring-2 ring-white/50';
+                if (isWordComplete) {
+                     // Active AND Complete - Emerald Green Cursor
+                     bgClass = 'bg-emerald-500';
+                     textClass = 'text-white font-black';
+                     borderClass = 'border-emerald-300';
+                     activeGlow = 'shadow-[0_0_20px_rgba(16,185,129,0.7)] z-30 scale-110 ring-2 ring-white/50';
+                } else {
+                     // Active Cursor Cell - Super Bright & Pop (Standard)
+                     bgClass = 'bg-fuchsia-500';
+                     textClass = 'text-white font-black';
+                     borderClass = 'border-fuchsia-300';
+                     activeGlow = 'shadow-[0_0_20px_rgba(217,70,239,0.7)] z-30 scale-110 ring-2 ring-white/50';
+                }
             } else if (isWordComplete) {
                 // Completed Word - Emerald Green
                 bgClass = 'bg-emerald-600';
@@ -93,11 +104,12 @@ export const PuzzleGrid: React.FC<PuzzleGridProps> = ({ grid, onCellClick }) => 
                   border rounded-md font-bold uppercase
                   hover:brightness-110
                   ${activeGlow}
+                  aspect-square
                 `}
               >
                 {/* Number Label */}
                 {cell.number && (
-                  <span className={`absolute top-0.5 left-1 ${size >= 10 ? 'text-[8px]' : 'text-[10px]'} font-mono opacity-80 leading-none pointer-events-none`}>
+                  <span className={`absolute top-0.5 left-1 ${size >= 12 ? 'text-[8px]' : 'text-[10px]'} font-mono opacity-80 leading-none pointer-events-none`}>
                     {cell.number}
                   </span>
                 )}
