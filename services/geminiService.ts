@@ -8,6 +8,50 @@ const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 // gemini-3-flash-preview is optimized for speed and instruction following
 const MODEL_ID = "gemini-3-flash-preview"; 
 
+// Emergency backup for when API quota is hit (429) or offline
+const EMERGENCY_BACKUP_WORDS: WordItem[] = [
+    { answer: "NETFLIX", clue: "Streaming giant" },
+    { answer: "OSCAR", clue: "Academy Award nickname" },
+    { answer: "GRAMMY", clue: "Music award" },
+    { answer: "EMMY", clue: "TV award" },
+    { answer: "CINEMA", clue: "Movie theater" },
+    { answer: "ACTOR", clue: "Performer in a film" },
+    { answer: "ALBUM", clue: "Collection of songs" },
+    { answer: "SONG", clue: "Musical track" },
+    { answer: "DRAMA", clue: "Serious genre" },
+    { answer: "COMEDY", clue: "Funny genre" },
+    { answer: "STAR", clue: "Celebrity" },
+    { answer: "FAME", clue: "Celebrity status" },
+    { answer: "PLOT", clue: "Storyline" },
+    { answer: "SCENE", clue: "Part of a movie" },
+    { answer: "CAST", clue: "Group of actors" },
+    { answer: "SHOW", clue: "TV program" },
+    { answer: "BAND", clue: "Musical group" },
+    { answer: "HIT", clue: "Popular song" },
+    { answer: "FAN", clue: "Supporter" },
+    { answer: "IDOL", clue: "Role model or TV show" },
+    { answer: "POPCORN", clue: "Movie snack" },
+    { answer: "TICKET", clue: "Admission pass" },
+    { answer: "SCREEN", clue: "Movie display surface" },
+    { answer: "CAMERA", clue: "Filming device" },
+    { answer: "ACTION", clue: "Director's command" },
+    { answer: "CUT", clue: "Stop filming" },
+    { answer: "ROLE", clue: "Character played by actor" },
+    { answer: "STAGE", clue: "Performance platform" },
+    { answer: "AUDIO", clue: "Sound component" },
+    { answer: "VIDEO", clue: "Visual component" },
+    { answer: "REMIX", clue: "Altered song version" },
+    { answer: "INDIE", clue: "Independent film/music" },
+    { answer: "GENRE", clue: "Category of art" },
+    { answer: "SCRIPT", clue: "Written dialogue" },
+    { answer: "PILOT", clue: "First episode" },
+    { answer: "STUDIO", clue: "Filming location" },
+    { answer: "DIRECTOR", clue: "Film boss" },
+    { answer: "SEQUEL", clue: "Follow-up movie" },
+    { answer: "PREQUEL", clue: "Backstory movie" },
+    { answer: "BLOCKBUSTER", clue: "Big hit movie" }
+];
+
 interface DifficultyProfile {
     gridSize: number;
     minWords: number;      // Minimum required to accept the puzzle
@@ -29,11 +73,9 @@ const fetchWordList = async (topic: string, difficulty: Difficulty, region: Regi
     // A. Check Local Word Bank First
     const cachedWords = getWordBank(topic, difficulty);
     
-    // Check if we have enough cached words to satisfy the fetchCount (or at least a good chunk of it)
-    // We want a fresh mix, but if we have plenty, we skip AI.
+    // Check if we have enough cached words to satisfy the fetchCount
     if (cachedWords.length >= config.fetchCount) {
         console.log(`Using Cached Words for ${difficulty} (${cachedWords.length} avail)`);
-        // Shuffle array
         return cachedWords.sort(() => 0.5 - Math.random()); 
     }
 
@@ -100,10 +142,23 @@ const fetchWordList = async (topic: string, difficulty: Difficulty, region: Regi
 
         return validWords;
 
-    } catch (e) {
-        console.error("AI Fetch Error", e);
-        // Fallback to cache if AI fails, even if small
-        return cachedWords.length > 0 ? cachedWords : [];
+    } catch (e: any) {
+        // Detect Quota Exhaustion (429) or Network Issues
+        const isQuotaError = JSON.stringify(e).includes("429") || e.message?.includes("quota") || e.status === 429;
+        
+        console.warn(`AI Fetch Failed (${isQuotaError ? 'Quota Exceeded' : 'Network/Other'}). Using Hybrid Fallback.`);
+        
+        // HYBRID FALLBACK STRATEGY:
+        // Combine whatever we have in cache with the Emergency Backup words.
+        // This ensures we always have a large pool of words to generate a grid,
+        // preventing "Could not build valid grid" errors due to small word lists.
+        const combined = [...cachedWords, ...EMERGENCY_BACKUP_WORDS];
+        
+        // Deduplicate by answer
+        const unique = Array.from(new Map(combined.map(item => [item.answer, item])).values());
+        
+        // Ensure we filter by size now, to prevent issues later
+        return unique.filter(w => w.answer.length <= config.gridSize);
     }
 };
 
@@ -143,7 +198,7 @@ const generateLayout = (wordList: WordItem[], size: number): PuzzleData | null =
             const curR = dir === 'across' ? r : r + i;
             const curC = dir === 'across' ? c + i : c;
             
-            // Double check bounds for safety, though 'Basic Bounds' should cover it
+            // Double check bounds for safety
             if (!inBounds(curR, curC)) return false;
 
             const char = word[i];
@@ -152,9 +207,7 @@ const generateLayout = (wordList: WordItem[], size: number): PuzzleData | null =
             // Collision check: Cell must be empty OR match the letter
             if (gridChar !== '.' && gridChar !== char) return false;
 
-            // Adjacency check (Crucial for validity):
-            // If we are placing content into an EMPTY cell, we must ensure it doesn't accidentally
-            // touch other words on its parallel sides, creating 2-letter nonsense words.
+            // Adjacency check
             if (gridChar === '.') {
                 if (dir === 'across') {
                    // Check Top/Bottom neighbors
@@ -232,7 +285,7 @@ const generateLayout = (wordList: WordItem[], size: number): PuzzleData | null =
                          const existingDir = existingClue.direction;
                          const newDir = existingDir === 'across' ? 'down' : 'across';
 
-                         // Calculate proposed start pos based on intersection alignment
+                         // Calculate proposed start pos
                          const intR = existingDir === 'across' ? existingClue.row : existingClue.row + eIdx;
                          const intC = existingDir === 'across' ? existingClue.col + eIdx : existingClue.col;
 
@@ -251,7 +304,7 @@ const generateLayout = (wordList: WordItem[], size: number): PuzzleData | null =
         }
     }
 
-    // Renumbering logic (Standard Crossword Numbering)
+    // Renumbering logic
     clues.forEach(c => c.number = 0); 
     let counter = 1;
     
@@ -287,29 +340,30 @@ export const generatePuzzle = async (topic: string, difficulty: Difficulty, regi
     try {
         words = await fetchWordList(topic, difficulty, region);
     } catch (e) {
-        throw new Error("Failed to fetch words.");
+        console.error("Critical error in fetchWordList", e);
+        // Fallback to emergency words if everything blows up
+        words = EMERGENCY_BACKUP_WORDS;
     }
 
-    if (words.length === 0) throw new Error("Could not fetch words from AI");
+    // Fallback if empty (shouldn't happen with updated fetchWordList, but safe to keep)
+    if (words.length === 0) words = EMERGENCY_BACKUP_WORDS;
 
-    // Critical: Filter words that simply cannot fit the grid
+    // Filter fitting words
     const fittingWords = words.filter(w => w.answer.length <= config.gridSize);
     
-    // Relaxed check: We need enough words to TRY, but if we have fewer than minWords, it's risky.
-    // However, if we only have 8 words for Medium (target 10), we might still want to try to place them all.
-    if (fittingWords.length < 3) throw new Error("Not enough valid words for this grid size.");
+    // If we have very few words, default to emergency words again to ensure playability
+    if (fittingWords.length < 3) {
+        console.warn("Too few words from source. Augmenting with backup.");
+        fittingWords.push(...EMERGENCY_BACKUP_WORDS.filter(w => w.answer.length <= config.gridSize));
+    }
 
     let bestPuzzle: PuzzleData | null = null;
-
-    // Retry Strategy:
-    // Attempt 0: Longest words first (Standard heuristic)
-    // Attempt 1-24: Random shuffle (Brute force for variety)
     const MAX_ATTEMPTS = 25;
 
     for (let i = 0; i < MAX_ATTEMPTS; i++) {
         let attemptList = [...fittingWords];
         if (i === 0) {
-            // Heuristic sort: Longest words first often creates better spines
+            // Heuristic sort
             attemptList.sort((a, b) => b.answer.length - a.answer.length);
         } else {
             // Random shuffle
@@ -319,27 +373,35 @@ export const generatePuzzle = async (topic: string, difficulty: Difficulty, regi
         const candidate = generateLayout(attemptList, config.gridSize);
         
         if (candidate) {
-            // Score based on number of words placed
             if (!bestPuzzle || candidate.clues.length > bestPuzzle.clues.length) {
                 bestPuzzle = candidate;
             }
-            
-            // Optimization: If we hit our target density, we stop immediately.
             if (candidate.clues.length >= config.targetWords) break;
-            
-            // Also stop if we managed to use almost all available words (e.g. 90%)
             if (candidate.clues.length >= Math.floor(fittingWords.length * 0.9)) break;
         }
     }
     
-    // Final Validation: Did we meet the minimum word count for this difficulty?
-    // We allow a small grace margin (e.g. 1 word less) to avoid frustrating failures if close.
-    if (!bestPuzzle || bestPuzzle.clues.length < (config.minWords - 1)) {
-        console.warn(`Failed to meet min words for ${difficulty}. Got ${bestPuzzle?.clues.length || 0}, wanted ${config.minWords}`);
-        throw new Error(`Could not build a dense enough ${difficulty} grid. Try again.`);
+    // Relaxed Validation
+    // If we have at least 4 words, we consider it playable in failure scenarios.
+    const minimalThreshold = 4;
+    
+    if (!bestPuzzle || bestPuzzle.clues.length < minimalThreshold) {
+        // Only throw if it's truly broken (less than 4 words)
+        // If we have something small (e.g. 3 words) but it's valid, we could technically play it,
+        // but 4 is a reasonable minimum for a "game".
+        
+        console.warn(`Generation failed to create a dense grid. Best result: ${bestPuzzle?.clues.length || 0} words.`);
+        throw new Error(`Unable to generate a valid grid for ${topic}. Please try again or switch topics.`);
     }
+    
+    // If the puzzle is sparse (below expected minWords) but above minimalThreshold,
+    // we return it but might append a note to the theme.
+    const isSparse = bestPuzzle.clues.length < config.minWords;
 
-    return { ...bestPuzzle, theme: topic };
+    return { 
+        ...bestPuzzle, 
+        theme: isSparse ? `${topic} (Lite)` : topic 
+    };
 };
 
 export const getHintForCell = async (clue: string, currentAnswerPattern: string): Promise<string> => {
@@ -351,6 +413,7 @@ export const getHintForCell = async (clue: string, currentAnswerPattern: string)
         });
         return response.text || "No hint available.";
     } catch (e) {
-        return "Hint unavailable.";
+        console.warn("Hint fetch failed (likely quota)", e);
+        return "Hint unavailable (Network/Quota).";
     }
 }
