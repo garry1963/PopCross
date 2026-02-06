@@ -6,7 +6,7 @@ import { PuzzleGrid } from './components/PuzzleGrid';
 import { VirtualKeyboard } from './components/VirtualKeyboard';
 import { 
   Clapperboard, Music, Tv, Loader2, Sparkles, Trophy, 
-  Share2, Play, Zap, Calendar, Globe, Eye, Type, AlertCircle, Save,
+  Share2, Play, Zap, Calendar, Globe, Eye, Type, AlertCircle,
   Home, Grid, User, Settings, Skull, Mic2, Star, Disc, Film, Gamepad2, Volume2, VolumeX, Medal,
   Laugh, Guitar, Sword, Smartphone, Check, Eye as EyeIcon, Type as TypeIcon, Hash, ArrowLeft, Brain, BookOpen, MapPin, Flag
 } from 'lucide-react';
@@ -92,7 +92,6 @@ export default function App() {
   const [isAiThinking, setIsAiThinking] = useState(false);
   const [savedGameExists, setSavedGameExists] = useState(false);
   const [showRevealMenu, setShowRevealMenu] = useState(false);
-  const [isAutoSaving, setIsAutoSaving] = useState(false);
 
   // --- Persistence ---
   useEffect(() => {
@@ -107,39 +106,24 @@ export default function App() {
     localStorage.setItem('popcross_stats_v2', JSON.stringify(stats));
   }, [stats]);
 
-  // Optimized Autosave Logic
+  // Clean up save file when game is completed
   useEffect(() => {
-    if (gameState.status === 'playing') {
-      // Debounce the save operation to avoid writing to disk on every keystroke/timer tick
-      setIsAutoSaving(true);
-      const saveTimeout = setTimeout(() => {
-        saveGameState(gameState);
-        setIsAutoSaving(false);
-      }, 1000);
-
-      return () => clearTimeout(saveTimeout);
-    } else if (gameState.status === 'completed') {
+    if (gameState.status === 'completed') {
        clearGameState();
        setSavedGameExists(false);
     }
-  }, [
-    // Trigger save on these changes (moves), but NOT on every second of the timer
-    gameState.grid, 
-    gameState.score, 
-    gameState.hintsUsed, 
-    gameState.revealsUsed, 
-    gameState.status
-  ]);
+  }, [gameState.status]);
 
-  // Separate Timer Saver (Less frequent)
+  // Save on tab close/refresh
   useEffect(() => {
-    if (gameState.status === 'playing') {
-        const timerSaveInterval = setInterval(() => {
-            saveGameState(gameState); // Snapshot timer every 30s
-        }, 30000);
-        return () => clearInterval(timerSaveInterval);
-    }
-  }, [gameState.status, gameState.timer]);
+    const handleBeforeUnload = () => {
+      if (gameState.status === 'playing') {
+        saveGameState(gameState);
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [gameState]);
 
   // --- Game Loop ---
   useEffect(() => {
@@ -550,6 +534,14 @@ export default function App() {
     checkWinCondition(gridWithCompletions);
   };
 
+  const handleExitGame = () => {
+    if (gameState.status === 'playing') {
+      saveGameState(gameState);
+      setSavedGameExists(true);
+    }
+    setGameState(prev => ({ ...prev, view: 'home', status: 'idle' }));
+  };
+
   // Keyboard
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -852,10 +844,9 @@ export default function App() {
                         <div className="flex flex-col lg:flex-row h-full gap-4 pb-4">
                             {/* Game Header Mobile */}
                             <div className="flex justify-between items-center lg:hidden">
-                                <button onClick={() => setGameState(p => ({...p, view: 'home', status: 'idle'}))} className="text-slate-400 hover:text-white"><Home size={20}/></button>
+                                <button onClick={handleExitGame} className="text-slate-400 hover:text-white"><Home size={20}/></button>
                                 <span className="text-xs font-bold text-slate-500 uppercase tracking-widest">{gameState.puzzle?.theme}</span>
                                 <div className="flex items-center gap-3">
-                                    {isAutoSaving && <Save size={14} className="text-emerald-500 animate-pulse" />}
                                     <div className="font-mono text-fuchsia-400 text-sm">{Math.floor(gameState.timer/60)}:{(gameState.timer%60).toString().padStart(2,'0')}</div>
                                 </div>
                             </div>
@@ -870,7 +861,7 @@ export default function App() {
                                 {/* Desktop Header */}
                                 <div className="hidden lg:flex items-center justify-between px-1 pb-2 border-b border-white/5 mb-2">
                                     <button 
-                                        onClick={() => setGameState(p => ({...p, view: 'home', status: 'idle'}))}
+                                        onClick={handleExitGame}
                                         className="flex items-center gap-2 text-slate-500 hover:text-white transition-colors hover:bg-white/5 rounded-lg px-2 py-1"
                                     >
                                         <Home size={18} />
@@ -878,7 +869,6 @@ export default function App() {
                                     </button>
                                     <div className="flex flex-col items-end">
                                         <div className="flex items-center gap-2">
-                                             {isAutoSaving && <span className="text-[10px] text-emerald-500 font-bold uppercase tracking-widest animate-pulse">Saved</span>}
                                              <span className="text-[10px] font-bold text-slate-600 uppercase tracking-widest leading-none mb-1">{gameState.puzzle?.theme}</span>
                                         </div>
                                         <div className="font-mono text-fuchsia-400 text-sm leading-none">
