@@ -8,6 +8,27 @@ const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 // gemini-3-flash-preview is optimized for speed and instruction following
 const MODEL_ID = "gemini-3-flash-preview"; 
 
+// Topic-specific steering instructions to ensure high relevance
+const TOPIC_INSTRUCTIONS: Record<string, string> = {
+    'General': 'Focus on general knowledge, trivia, history, and common facts.',
+    'General Knowledge': 'Focus on academic trivia: world history, geography, science, literature, art, and nature. Avoid pop culture references.',
+    'Movies': 'Focus strictly on specific movie titles, famous actors, directors, awards, and cinematic terms. Avoid generic words.',
+    'TV Shows': 'Focus on specific TV series titles, famous characters, streaming services, and sitcom tropes.',
+    'Music': 'Focus on specific artist names, bands, musical terms, and hit song titles.',
+    '90s': 'Focus strictly on 1990-1999 pop culture. Specific TV shows, toys (e.g. Furby), fashion, and slang from that decade.',
+    '2000s': 'Focus strictly on 2000-2009 culture. Y2K trends, early internet, boy bands, and specific movies from this era.',
+    'Modern': 'Focus on 2015-Present trends, viral internet slang, social media apps, current pop stars, and memes.',
+    'Horror': 'Focus on horror movie villains, monsters, specific slasher films, halloween tropes, and spooky terminology.',
+    'Sci-Fi': 'Focus on space, aliens, future technology, Star Wars/Trek references, and science fiction concepts.',
+    'Comedy': 'Focus on famous comedians, sitcom titles, funny movie quotes, and types of humor.',
+    'Hip-Hop': 'Focus on rappers, hip-hop slang, breakdancing, DJing, and classic albums.',
+    'Rock': 'Focus on rock bands, electric guitars, famous drummers, and rock anthems.',
+    'Pop Divas': 'Focus strictly on famous female pop singers (Madonna, Beyonce, Taylor, etc) and their specific hit songs.',
+    'Superheroes': 'Focus on Marvel/DC character names, super powers, villains, and comic book terms.',
+    'Reality TV': 'Focus on competition shows, dating shows, catchphrases, and famous reality stars.',
+    'Anime': 'Focus on Japanese animation, specific anime titles (Naruto, One Piece), manga, and otaku culture.'
+};
+
 // Emergency backup for when API quota is hit (429) or offline
 const EMERGENCY_BACKUP_WORDS: WordItem[] = [
     { answer: "NETFLIX", clue: "Streaming giant" },
@@ -49,7 +70,28 @@ const EMERGENCY_BACKUP_WORDS: WordItem[] = [
     { answer: "DIRECTOR", clue: "Film boss" },
     { answer: "SEQUEL", clue: "Follow-up movie" },
     { answer: "PREQUEL", clue: "Backstory movie" },
-    { answer: "BLOCKBUSTER", clue: "Big hit movie" }
+    { answer: "BLOCKBUSTER", clue: "Big hit movie" },
+    // Expanded Backup for Higher Difficulty Density
+    { answer: "FILM", clue: "Motion picture" },
+    { answer: "EPIC", clue: "Grand scale story" },
+    { answer: "HERO", clue: "Protagonist" },
+    { answer: "VILLAIN", clue: "Antagonist" },
+    { answer: "SOUND", clue: "Audio track" },
+    { answer: "EDIT", clue: "Cut film" },
+    { answer: "CLIP", clue: "Short video" },
+    { answer: "HOST", clue: "Show presenter" },
+    { answer: "LIVE", clue: "Not recorded" },
+    { answer: "NEWS", clue: "Current events program" },
+    { answer: "PROP", clue: "Object used on set" },
+    { answer: "SET", clue: "Scenery construction" },
+    { answer: "CUE", clue: "Signal to start" },
+    { answer: "DIVA", clue: "Famous female singer" },
+    { answer: "RAP", clue: "Rhythmic vocal style" },
+    { answer: "JAZZ", clue: "Improvisational genre" },
+    { answer: "SOLO", clue: "Performance by one" },
+    { answer: "DUET", clue: "Performance by two" },
+    { answer: "TRIO", clue: "Group of three" },
+    { answer: "TOUR", clue: "Series of concerts" }
 ];
 
 interface DifficultyProfile {
@@ -60,10 +102,11 @@ interface DifficultyProfile {
 }
 
 const DIFFICULTY_CONFIG: Record<Difficulty, DifficultyProfile> = {
-    'Easy':   { gridSize: 9,  minWords: 6,  targetWords: 10, fetchCount: 30 },
-    'Medium': { gridSize: 11, minWords: 10, targetWords: 15, fetchCount: 40 },
-    'Hard':   { gridSize: 13, minWords: 15, targetWords: 20, fetchCount: 50 },
-    'Expert': { gridSize: 15, minWords: 20, targetWords: 25, fetchCount: 60 },
+    // UPDATED: Significantly increased targets for higher density
+    'Easy':   { gridSize: 9,  minWords: 8,  targetWords: 14, fetchCount: 40 },
+    'Medium': { gridSize: 11, minWords: 14, targetWords: 22, fetchCount: 60 },
+    'Hard':   { gridSize: 13, minWords: 20, targetWords: 32, fetchCount: 80 },
+    'Expert': { gridSize: 15, minWords: 26, targetWords: 38, fetchCount: 100 },
 };
 
 // 1. Fetch Word List
@@ -81,16 +124,23 @@ const fetchWordList = async (topic: string, difficulty: Difficulty, region: Regi
 
     // B. If not enough cached, call AI
     console.log(`Fetching ${config.fetchCount} new words from AI for ${difficulty}...`);
+    
+    const specificInstruction = TOPIC_INSTRUCTIONS[topic] || `Focus strictly on ${topic}.`;
+
     const prompt = `
-      Generate a list of ${config.fetchCount} crossword answers and clues for the topic "${topic}" (${region} context).
+      Generate a list of ${config.fetchCount} crossword answers and clues for the category: "${topic}" (${region} context).
       Difficulty: ${difficulty}.
       
+      Topic Guidelines:
+      ${specificInstruction}
+      
       Rules:
-      - Answers must be single words (no spaces) or common phrases with spaces removed.
-      - Uppercase only.
-      - Minimum length 3, Maximum length ${config.gridSize}.
-      - No special characters.
-      - Ensure a mix of word lengths (short words are important for connecting).
+      1. STRICT RELEVANCE: Every answer must be directly related to "${topic}". Do not include generic words (like "THE", "AND", "IT") unless they are part of a specific title.
+      2. Answers must be single words (no spaces) or common phrases with spaces removed.
+      3. Uppercase only.
+      4. Length: Minimum 3 letters, Maximum ${config.gridSize} letters.
+      5. No special characters.
+      6. DENSITY FOCUS: Provide a mix of lengths, but prioritize 3-7 letter words. Short words are essential for creating a dense grid with many words.
       
       Output JSON format:
       [ { "answer": "WORD", "clue": "Hint" }, ... ]
@@ -115,7 +165,7 @@ const fetchWordList = async (topic: string, difficulty: Difficulty, region: Regi
             config: {
                 responseMimeType: "application/json",
                 responseSchema: schema,
-                temperature: 0.8 // High creativity for variety
+                temperature: 0.7 // Slightly lowered temperature to stay on topic
             }
         });
         
@@ -150,14 +200,11 @@ const fetchWordList = async (topic: string, difficulty: Difficulty, region: Regi
         
         // HYBRID FALLBACK STRATEGY:
         // Combine whatever we have in cache with the Emergency Backup words.
-        // This ensures we always have a large pool of words to generate a grid,
-        // preventing "Could not build valid grid" errors due to small word lists.
         const combined = [...cachedWords, ...EMERGENCY_BACKUP_WORDS];
         
         // Deduplicate by answer
         const unique = Array.from(new Map(combined.map(item => [item.answer, item])).values());
         
-        // Ensure we filter by size now, to prevent issues later
         return unique.filter(w => w.answer.length <= config.gridSize);
     }
 };
@@ -358,7 +405,8 @@ export const generatePuzzle = async (topic: string, difficulty: Difficulty, regi
     }
 
     let bestPuzzle: PuzzleData | null = null;
-    const MAX_ATTEMPTS = 25;
+    // Increased max attempts to find a denser grid
+    const MAX_ATTEMPTS = 50;
 
     for (let i = 0; i < MAX_ATTEMPTS; i++) {
         let attemptList = [...fittingWords];
@@ -386,10 +434,6 @@ export const generatePuzzle = async (topic: string, difficulty: Difficulty, regi
     const minimalThreshold = 4;
     
     if (!bestPuzzle || bestPuzzle.clues.length < minimalThreshold) {
-        // Only throw if it's truly broken (less than 4 words)
-        // If we have something small (e.g. 3 words) but it's valid, we could technically play it,
-        // but 4 is a reasonable minimum for a "game".
-        
         console.warn(`Generation failed to create a dense grid. Best result: ${bestPuzzle?.clues.length || 0} words.`);
         throw new Error(`Unable to generate a valid grid for ${topic}. Please try again or switch topics.`);
     }
@@ -397,10 +441,12 @@ export const generatePuzzle = async (topic: string, difficulty: Difficulty, regi
     // If the puzzle is sparse (below expected minWords) but above minimalThreshold,
     // we return it but might append a note to the theme.
     const isSparse = bestPuzzle.clues.length < config.minWords;
+    // Check if we used fallback list predominantly
+    const isEmergency = words === EMERGENCY_BACKUP_WORDS || (fittingWords.filter(w => EMERGENCY_BACKUP_WORDS.includes(w)).length > fittingWords.length / 2);
 
     return { 
         ...bestPuzzle, 
-        theme: isSparse ? `${topic} (Lite)` : topic 
+        theme: isEmergency ? `${topic} (Offline Mix)` : (isSparse ? `${topic} (Lite)` : topic)
     };
 };
 

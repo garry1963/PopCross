@@ -80,7 +80,7 @@ export interface GameState {
 }
 
 export type TopicId = 
-  | 'General'
+  | 'General' | 'General Knowledge'
   | 'Movies' | 'TV Shows' | 'Music' 
   | '90s' | '2000s' | 'Modern' 
   | 'Horror' | 'Sci-Fi' | 'Comedy' 

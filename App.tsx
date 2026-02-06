@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { GameState, CellData, Direction, TopicId, Category, GameSettings, UserStats, Badge, Clue } from './types';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { GameState, CellData, Direction, TopicId, Category, GameSettings, UserStats, Badge, Clue, Region } from './types';
 import { generatePuzzle, getHintForCell } from './services/geminiService';
 import { getDailyPuzzleFromDb, saveDailyPuzzleToDb, saveGameState, loadGameState, clearGameState } from './services/storageService';
 import { PuzzleGrid } from './components/PuzzleGrid';
@@ -8,13 +8,14 @@ import {
   Clapperboard, Music, Tv, Loader2, Sparkles, Trophy, 
   Share2, Play, Zap, Calendar, Globe, Eye, Type, AlertCircle, Save,
   Home, Grid, User, Settings, Skull, Mic2, Star, Disc, Film, Gamepad2, Volume2, VolumeX, Medal,
-  Laugh, Guitar, Sword, Smartphone, Check, Eye as EyeIcon, Type as TypeIcon, Hash, ArrowLeft, Brain
+  Laugh, Guitar, Sword, Smartphone, Check, Eye as EyeIcon, Type as TypeIcon, Hash, ArrowLeft, Brain, BookOpen, MapPin, Flag
 } from 'lucide-react';
 
 // --- Configuration & Data ---
 
 const CATEGORIES: Category[] = [
   { id: 'General', label: 'General', icon: <Brain size={20}/>, color: 'text-teal-400', description: 'Trivia & Variety' },
+  { id: 'General Knowledge', label: 'Gen Knowledge', icon: <BookOpen size={20}/>, color: 'text-lime-400', description: 'History, Science & Geo' },
   { id: 'Movies', label: 'Movies', icon: <Clapperboard size={20}/>, color: 'text-pink-400', description: 'Blockbusters & Classics' },
   { id: 'TV Shows', label: 'TV Shows', icon: <Tv size={20}/>, color: 'text-blue-400', description: 'Binge-worthy Series' },
   { id: 'Music', label: 'Music', icon: <Music size={20}/>, color: 'text-purple-400', description: 'Top Charts & Legends' },
@@ -91,6 +92,7 @@ export default function App() {
   const [isAiThinking, setIsAiThinking] = useState(false);
   const [savedGameExists, setSavedGameExists] = useState(false);
   const [showRevealMenu, setShowRevealMenu] = useState(false);
+  const [isAutoSaving, setIsAutoSaving] = useState(false);
 
   // --- Persistence ---
   useEffect(() => {
@@ -105,16 +107,39 @@ export default function App() {
     localStorage.setItem('popcross_stats_v2', JSON.stringify(stats));
   }, [stats]);
 
+  // Optimized Autosave Logic
   useEffect(() => {
     if (gameState.status === 'playing') {
-      saveGameState(gameState);
-    } else if (gameState.status === 'completed' || gameState.status === 'idle') {
-       if (gameState.status === 'completed') {
-           clearGameState();
-           setSavedGameExists(false);
-       }
+      // Debounce the save operation to avoid writing to disk on every keystroke/timer tick
+      setIsAutoSaving(true);
+      const saveTimeout = setTimeout(() => {
+        saveGameState(gameState);
+        setIsAutoSaving(false);
+      }, 1000);
+
+      return () => clearTimeout(saveTimeout);
+    } else if (gameState.status === 'completed') {
+       clearGameState();
+       setSavedGameExists(false);
     }
-  }, [gameState]);
+  }, [
+    // Trigger save on these changes (moves), but NOT on every second of the timer
+    gameState.grid, 
+    gameState.score, 
+    gameState.hintsUsed, 
+    gameState.revealsUsed, 
+    gameState.status
+  ]);
+
+  // Separate Timer Saver (Less frequent)
+  useEffect(() => {
+    if (gameState.status === 'playing') {
+        const timerSaveInterval = setInterval(() => {
+            saveGameState(gameState); // Snapshot timer every 30s
+        }, 30000);
+        return () => clearInterval(timerSaveInterval);
+    }
+  }, [gameState.status, gameState.timer]);
 
   // --- Game Loop ---
   useEffect(() => {
@@ -667,20 +692,50 @@ export default function App() {
   const CategoriesView = () => (
       <div className="flex flex-col gap-6 w-full max-w-2xl mx-auto pb-24 animate-[fade-in_0.5s_ease-out]">
           <h1 className="text-3xl font-black italic tracking-tighter text-white mb-2">CHANNELS</h1>
-          <div className="flex items-center gap-2 mb-4 overflow-x-auto hide-scrollbar pb-2">
-              {['Easy', 'Medium', 'Hard', 'Expert'].map(d => (
-                  <button 
-                    key={d} 
-                    onClick={() => setGameState(p => ({...p, settings: {...p.settings, difficulty: d as any}}))}
-                    className={`px-4 py-2 rounded-full text-xs font-bold uppercase tracking-wider border whitespace-nowrap transition-all flex items-center gap-2
-                    ${gameState.settings.difficulty === d ? 'bg-white text-black border-white' : 'bg-transparent text-slate-500 border-slate-800 hover:border-slate-600'}`}
-                  >
-                      <span>{d}</span>
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded ${gameState.settings.difficulty === d ? 'bg-black/10 text-black' : 'bg-slate-800 text-slate-400'}`}>
-                        {POINTS_BY_DIFFICULTY[d]}pts
-                      </span>
-                  </button>
-              ))}
+          
+          {/* Settings Group */}
+          <div className="flex flex-col gap-3 glass-panel p-4 rounded-xl border border-slate-800">
+            {/* Difficulty Selector */}
+            <div className="flex flex-col gap-2">
+                <span className="text-[10px] uppercase font-bold text-slate-500 tracking-widest">Difficulty</span>
+                <div className="flex items-center gap-2 overflow-x-auto hide-scrollbar">
+                    {['Easy', 'Medium', 'Hard', 'Expert'].map(d => (
+                        <button 
+                            key={d} 
+                            onClick={() => setGameState(p => ({...p, settings: {...p.settings, difficulty: d as any}}))}
+                            className={`px-4 py-2 rounded-full text-xs font-bold uppercase tracking-wider border whitespace-nowrap transition-all flex items-center gap-2
+                            ${gameState.settings.difficulty === d ? 'bg-white text-black border-white' : 'bg-transparent text-slate-500 border-slate-800 hover:border-slate-600'}`}
+                        >
+                            <span>{d}</span>
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded ${gameState.settings.difficulty === d ? 'bg-black/10 text-black' : 'bg-slate-800 text-slate-400'}`}>
+                                {POINTS_BY_DIFFICULTY[d]}pts
+                            </span>
+                        </button>
+                    ))}
+                </div>
+            </div>
+
+            {/* Region Selector */}
+            <div className="flex flex-col gap-2 mt-2">
+                <span className="text-[10px] uppercase font-bold text-slate-500 tracking-widest">Region Focus</span>
+                <div className="flex items-center gap-2">
+                    {[
+                        { id: 'Global', label: 'Global', icon: <Globe size={14}/> },
+                        { id: 'USA', label: 'USA', icon: <span className="text-xs">🇺🇸</span> },
+                        { id: 'UK', label: 'UK', icon: <span className="text-xs">🇬🇧</span> },
+                    ].map(r => (
+                        <button 
+                            key={r.id} 
+                            onClick={() => setGameState(p => ({...p, settings: {...p.settings, region: r.id as Region}}))}
+                            className={`px-4 py-2 rounded-full text-xs font-bold uppercase tracking-wider border whitespace-nowrap transition-all flex items-center gap-2
+                            ${gameState.settings.region === r.id ? 'bg-cyan-500 text-white border-cyan-500 shadow-[0_0_15px_rgba(6,182,212,0.5)]' : 'bg-transparent text-slate-500 border-slate-800 hover:border-slate-600'}`}
+                        >
+                            {r.icon}
+                            <span>{r.label}</span>
+                        </button>
+                    ))}
+                </div>
+            </div>
           </div>
           
           <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
@@ -799,7 +854,10 @@ export default function App() {
                             <div className="flex justify-between items-center lg:hidden">
                                 <button onClick={() => setGameState(p => ({...p, view: 'home', status: 'idle'}))} className="text-slate-400 hover:text-white"><Home size={20}/></button>
                                 <span className="text-xs font-bold text-slate-500 uppercase tracking-widest">{gameState.puzzle?.theme}</span>
-                                <div className="font-mono text-fuchsia-400 text-sm">{Math.floor(gameState.timer/60)}:{(gameState.timer%60).toString().padStart(2,'0')}</div>
+                                <div className="flex items-center gap-3">
+                                    {isAutoSaving && <Save size={14} className="text-emerald-500 animate-pulse" />}
+                                    <div className="font-mono text-fuchsia-400 text-sm">{Math.floor(gameState.timer/60)}:{(gameState.timer%60).toString().padStart(2,'0')}</div>
+                                </div>
                             </div>
 
                             {/* Board Area */}
@@ -819,7 +877,10 @@ export default function App() {
                                         <span className="text-xs font-bold uppercase tracking-widest">Home</span>
                                     </button>
                                     <div className="flex flex-col items-end">
-                                        <span className="text-[10px] font-bold text-slate-600 uppercase tracking-widest leading-none mb-1">{gameState.puzzle?.theme}</span>
+                                        <div className="flex items-center gap-2">
+                                             {isAutoSaving && <span className="text-[10px] text-emerald-500 font-bold uppercase tracking-widest animate-pulse">Saved</span>}
+                                             <span className="text-[10px] font-bold text-slate-600 uppercase tracking-widest leading-none mb-1">{gameState.puzzle?.theme}</span>
+                                        </div>
                                         <div className="font-mono text-fuchsia-400 text-sm leading-none">
                                             {Math.floor(gameState.timer/60)}:{(gameState.timer%60).toString().padStart(2,'0')}
                                         </div>
