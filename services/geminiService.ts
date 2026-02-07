@@ -463,3 +463,18 @@ export const getHintForCell = async (clue: string, currentAnswerPattern: string)
         return "Hint unavailable (Network/Quota).";
     }
 }
+
+// Simple health check to verify API Key and Connectivity
+export const checkApiHealth = async (): Promise<boolean> => {
+    try {
+        await ai.models.generateContent({
+            model: MODEL_ID,
+            contents: "ping",
+            config: { maxOutputTokens: 1 }
+        });
+        return true;
+    } catch (e) {
+        console.warn("API Health Check Failed", e);
+        return false;
+    }
+}

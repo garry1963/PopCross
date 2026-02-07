@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { GameState, CellData, Direction, TopicId, Category, GameSettings, UserStats, Badge, Clue, Region } from './types';
-import { generatePuzzle, getHintForCell } from './services/geminiService';
+import { generatePuzzle, getHintForCell, checkApiHealth } from './services/geminiService';
 import { getDailyPuzzleFromDb, saveDailyPuzzleToDb, saveGameState, loadGameState, clearGameState } from './services/storageService';
 import { PuzzleGrid } from './components/PuzzleGrid';
 import { VirtualKeyboard } from './components/VirtualKeyboard';
@@ -92,6 +92,7 @@ export default function App() {
   const [isAiThinking, setIsAiThinking] = useState(false);
   const [savedGameExists, setSavedGameExists] = useState(false);
   const [showRevealMenu, setShowRevealMenu] = useState(false);
+  const [apiStatus, setApiStatus] = useState<'checking' | 'ok' | 'error'>('checking');
 
   // --- Persistence ---
   useEffect(() => {
@@ -100,6 +101,9 @@ export default function App() {
 
     const savedGame = loadGameState();
     if (savedGame) setSavedGameExists(true);
+
+    // Initial API Health Check
+    checkApiHealth().then(isOk => setApiStatus(isOk ? 'ok' : 'error'));
   }, []);
 
   useEffect(() => {
@@ -358,6 +362,17 @@ export default function App() {
     }
   };
 
+  // AI and Hints
+  const getCurrentClue = () => {
+    if (!gameState.puzzle || !gameState.selectedCell) return null;
+    const { row, col } = gameState.selectedCell;
+    return gameState.puzzle.clues.find(c => {
+      if (gameState.direction === 'across') return c.row === row && c.col <= col && (c.col + c.answer.length) > col && c.direction === 'across';
+      if (gameState.direction === 'down') return c.col === col && c.row <= row && (c.row + c.answer.length) > row && c.direction === 'down';
+      return false;
+    });
+  };
+
   const handleInput = useCallback((char: string) => {
     if (gameState.status !== 'playing' || !gameState.selectedCell || !gameState.puzzle) return;
     const { row, col } = gameState.selectedCell;
@@ -372,19 +387,100 @@ export default function App() {
         isError: false // Clear error when typing
     };
 
-    // Smart Navigation: Skip black squares
+    const gridWithCompletions = checkWordCompletions(newGrid, gameState.puzzle.clues);
+    
+    // --- Auto-Navigation Logic ---
     let nextRow = row;
     let nextCol = col;
+    let nextDir = gameState.direction;
     
-    // Simple Next Cell Logic (Can be improved to jump black squares)
-    if (gameState.direction === 'across') {
-       if (col < newGrid.length - 1 && !newGrid[row][col+1].isBlack) nextCol++;
-    } else {
-       if (row < newGrid.length - 1 && !newGrid[row+1][col].isBlack) nextRow++;
+    const updatedCurrentCell = gridWithCompletions[row][col];
+    
+    // CASE 1: Word Completed -> Jump to next incomplete word
+    if (updatedCurrentCell.isWordComplete) {
+        const clues = gameState.puzzle.clues;
+        const currentClue = clues.find(c => {
+            if (gameState.direction === 'across') return c.row === row && c.col <= col && (c.col + c.answer.length) > col && c.direction === 'across';
+            if (gameState.direction === 'down') return c.col === col && c.row <= row && (c.row + c.answer.length) > row && c.direction === 'down';
+            return false;
+        });
+
+        if (currentClue) {
+            const currentIndex = clues.indexOf(currentClue);
+            let foundNext = false;
+            
+            // Cycle through clues starting from next one to find an incomplete one
+            for (let i = 1; i < clues.length; i++) {
+                const idx = (currentIndex + i) % clues.length;
+                const candidate = clues[idx];
+                
+                // Check if this candidate is incomplete
+                let isCandidateComplete = true;
+                if (candidate.direction === 'across') {
+                    for(let k=0; k<candidate.answer.length; k++) {
+                        if (!gridWithCompletions[candidate.row][candidate.col+k].isWordComplete) {
+                            isCandidateComplete = false;
+                            break;
+                        }
+                    }
+                } else {
+                     for(let k=0; k<candidate.answer.length; k++) {
+                        if (!gridWithCompletions[candidate.row+k][candidate.col].isWordComplete) {
+                            isCandidateComplete = false;
+                            break;
+                        }
+                    }
+                }
+
+                if (!isCandidateComplete) {
+                    nextRow = candidate.row;
+                    nextCol = candidate.col;
+                    nextDir = candidate.direction;
+                    foundNext = true;
+                    break;
+                }
+            }
+            
+            if (!foundNext) {
+                // Puzzle essentially done, stay put or clear selection
+            }
+        }
+    } 
+    // CASE 2: Word Not Complete -> Jump to NEXT EMPTY cell in current word (Skip filled)
+    else {
+        let r = row;
+        let c = col;
+        let foundEmpty = false;
+        
+        // Look ahead in the current direction until we hit a black square or boundary
+        while(true) {
+            if (gameState.direction === 'across') c++; else r++;
+            
+            // Bounds check
+            if (r >= newGrid.length || c >= newGrid.length) break;
+            if (newGrid[r][c].isBlack) break;
+            
+            // Found empty spot?
+            if (newGrid[r][c].userValue === '') {
+                nextRow = r;
+                nextCol = c;
+                foundEmpty = true;
+                break;
+            }
+        }
+        
+        // If no empty spot found ahead (e.g. word is filled but wrong), 
+        // fallback to standard "next cell" behavior so user isn't stuck
+        if (!foundEmpty) {
+             if (gameState.direction === 'across') {
+                if (col < newGrid.length - 1 && !newGrid[row][col+1].isBlack) nextCol = col + 1;
+             } else {
+                if (row < newGrid.length - 1 && !newGrid[row+1][col].isBlack) nextRow = row + 1;
+             }
+        }
     }
 
-    const gridWithCompletions = checkWordCompletions(newGrid, gameState.puzzle.clues);
-    updateSelectionHighlights(gridWithCompletions, { row: nextRow, col: nextCol }, gameState.direction);
+    updateSelectionHighlights(gridWithCompletions, { row: nextRow, col: nextCol }, nextDir);
     checkWinCondition(gridWithCompletions);
   }, [gameState]);
 
@@ -398,11 +494,16 @@ export default function App() {
     if (newGrid[row][col].userValue === '') {
         let prevRow = row;
         let prevCol = col;
+        // Simple backspace move
         if (gameState.direction === 'across') {
             if (col > 0 && !newGrid[row][col-1].isBlack) prevCol--;
         } else {
             if (row > 0 && !newGrid[row-1][col].isBlack) prevRow--;
         }
+        
+        // Optimization: If previous cell is revealed or word-completed, maybe jump back further? 
+        // For now, simple step back is standard behavior.
+        
         updateSelectionHighlights(newGrid, { row: prevRow, col: prevCol }, gameState.direction);
     } else {
         newGrid[row][col].userValue = '';
@@ -554,17 +655,6 @@ export default function App() {
   }, [gameState, handleInput, handleBackspace]);
 
 
-  // AI and Hints
-  const getCurrentClue = () => {
-    if (!gameState.puzzle || !gameState.selectedCell) return null;
-    const { row, col } = gameState.selectedCell;
-    return gameState.puzzle.clues.find(c => {
-      if (gameState.direction === 'across') return c.row === row && c.col <= col && (c.col + c.answer.length) > col && c.direction === 'across';
-      if (gameState.direction === 'down') return c.col === col && c.row <= row && (c.row + c.answer.length) > row && c.direction === 'down';
-      return false;
-    });
-  };
-
   const handleAskAI = async () => {
       const clue = getCurrentClue();
       if (!clue || isAiThinking) return;
@@ -613,8 +703,14 @@ export default function App() {
                 {/* Decorative background glow */}
                 <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-64 h-32 bg-fuchsia-500/20 blur-[80px] -z-10 rounded-full pointer-events-none"></div>
 
-                {/* Points Pill */}
-                <div className="flex items-center gap-2 mb-3">
+                <div className="flex flex-col items-center gap-2 mb-3">
+                   {/* API Status */}
+                   <div className={`px-3 py-1 rounded-full border flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest transition-colors ${apiStatus === 'ok' ? 'bg-emerald-950/50 border-emerald-500/30 text-emerald-400' : (apiStatus === 'error' ? 'bg-red-950/50 border-red-500/30 text-red-400' : 'bg-slate-900 border-slate-800 text-slate-500')}`}>
+                        <div className={`w-1.5 h-1.5 rounded-full ${apiStatus === 'ok' ? 'bg-emerald-400 shadow-[0_0_5px_currentColor]' : (apiStatus === 'error' ? 'bg-red-500 animate-pulse' : 'bg-slate-500 animate-pulse')}`}></div>
+                        {apiStatus === 'checking' ? 'System Check...' : (apiStatus === 'ok' ? 'API Connected' : 'Connection Failed')}
+                   </div>
+                   
+                   {/* Points Pill */}
                    <div className="px-4 py-1.5 rounded-full bg-slate-900/80 border border-white/10 flex items-center gap-2 shadow-lg backdrop-blur-md hover:border-yellow-500/50 transition-colors cursor-default">
                        <Star size={14} className="text-yellow-400 fill-yellow-400 animate-pulse" />
                        <span className="font-mono font-bold text-yellow-100 text-sm tracking-widest">{stats.totalPoints.toLocaleString()} PTS</span>
