@@ -1,14 +1,16 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { GameState, CellData, Direction, TopicId, Category, GameSettings, UserStats, Badge, Clue, Region } from './types';
 import { generatePuzzle, getHintForCell, checkApiHealth } from './services/geminiService';
-import { getDailyPuzzleFromDb, saveDailyPuzzleToDb, saveGameState, loadGameState, clearGameState } from './services/storageService';
+import { getDailyPuzzleFromDb, saveDailyPuzzleToDb, saveGameState, loadGameState, clearGameState, getWordBankStats } from './services/storageService';
+import { scrapeCategoryWords } from './services/webScraperService';
 import { PuzzleGrid } from './components/PuzzleGrid';
 import { VirtualKeyboard } from './components/VirtualKeyboard';
 import { 
   Clapperboard, Music, Tv, Loader2, Sparkles, Trophy, 
   Share2, Play, Zap, Calendar, Globe, Eye, Type, AlertCircle,
   Home, Grid, User, Settings, Skull, Mic2, Star, Disc, Film, Gamepad2, Volume2, VolumeX, Medal,
-  Laugh, Guitar, Sword, Smartphone, Check, Eye as EyeIcon, Type as TypeIcon, Hash, ArrowLeft, Brain, BookOpen, MapPin, Flag
+  Laugh, Guitar, Sword, Smartphone, Check, Eye as EyeIcon, Type as TypeIcon, Hash, ArrowLeft, Brain, BookOpen, MapPin, Flag,
+  Download, Database, WifiOff
 } from 'lucide-react';
 
 // --- Configuration & Data ---
@@ -93,6 +95,11 @@ export default function App() {
   const [savedGameExists, setSavedGameExists] = useState(false);
   const [showRevealMenu, setShowRevealMenu] = useState(false);
   const [apiStatus, setApiStatus] = useState<'checking' | 'ok' | 'error'>('checking');
+  
+  // Scraper State
+  const [wordBankStats, setWordBankStats] = useState<Record<string, number>>({});
+  const [isScraping, setIsScraping] = useState<string | null>(null);
+  const [scrapeProgress, setScrapeProgress] = useState("");
 
   // --- Persistence ---
   useEffect(() => {
@@ -104,6 +111,9 @@ export default function App() {
 
     // Initial API Health Check
     checkApiHealth().then(isOk => setApiStatus(isOk ? 'ok' : 'error'));
+    
+    // Load Word Bank Stats
+    setWordBankStats(getWordBankStats());
   }, []);
 
   useEffect(() => {
@@ -675,6 +685,30 @@ export default function App() {
       }
   };
 
+  // Scraper Action
+  const handleScrape = async (categoryId: string) => {
+      if (isScraping) return;
+      setIsScraping(categoryId);
+      setScrapeProgress("Starting...");
+      
+      try {
+          await scrapeCategoryWords(categoryId, (msg) => setScrapeProgress(msg));
+          // Refresh stats
+          setWordBankStats(getWordBankStats());
+          setScrapeProgress("Done!");
+          setTimeout(() => {
+              setIsScraping(null);
+              setScrapeProgress("");
+          }, 1500);
+      } catch (e) {
+          setScrapeProgress("Failed.");
+          setTimeout(() => {
+              setIsScraping(null);
+              setScrapeProgress("");
+          }, 1500);
+      }
+  };
+
   // --- Views ---
 
   const Navbar = () => (
@@ -824,6 +858,48 @@ export default function App() {
                     ))}
                 </div>
             </div>
+          </div>
+
+          {/* Scraper / Content Manager */}
+          <div className="glass-panel p-4 rounded-xl border border-slate-800">
+             <div className="flex items-center gap-2 mb-3">
+                <Database size={18} className="text-emerald-400" />
+                <h2 className="text-sm font-bold uppercase tracking-widest text-slate-300">Offline Content Packs</h2>
+             </div>
+             <p className="text-xs text-slate-500 mb-4">Download word packs to play offline and reduce data usage. Scrapes authoritative web sources.</p>
+             
+             <div className="grid grid-cols-1 gap-2 max-h-48 overflow-y-auto pr-2 custom-scrollbar">
+                {CATEGORIES.map(cat => {
+                    const count = wordBankStats[cat.id] || 0;
+                    const isDownloading = isScraping === cat.id;
+                    return (
+                        <div key={cat.id} className="flex items-center justify-between p-2 bg-slate-900/50 rounded-lg border border-white/5">
+                            <div className="flex items-center gap-3">
+                                <div className={`p-1.5 rounded-md ${cat.color} bg-white/5`}>{cat.icon}</div>
+                                <div>
+                                    <div className="text-xs font-bold text-white">{cat.label}</div>
+                                    <div className={`text-[10px] font-mono ${count > 0 ? 'text-emerald-400' : 'text-slate-600'}`}>
+                                        {count > 0 ? `${count} Words Cached` : 'No Data'}
+                                    </div>
+                                </div>
+                            </div>
+                            <button 
+                                onClick={() => handleScrape(cat.id)}
+                                disabled={!!isScraping}
+                                className={`px-3 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-wide flex items-center gap-2 transition-colors
+                                ${count > 50 ? 'bg-emerald-900/30 text-emerald-400 border border-emerald-500/30' : 'bg-slate-800 text-slate-400 border border-slate-700 hover:bg-slate-700 hover:text-white'}
+                                ${isDownloading ? 'animate-pulse cursor-wait' : ''}`}
+                            >
+                                {isDownloading ? (
+                                    <><Loader2 size={12} className="animate-spin" /> {scrapeProgress}</>
+                                ) : (
+                                    <><Download size={12} /> {count > 50 ? 'Update' : 'Download'}</>
+                                )}
+                            </button>
+                        </div>
+                    );
+                })}
+             </div>
           </div>
           
           <div className="grid grid-cols-2 md:grid-cols-3 gap-3">

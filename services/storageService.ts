@@ -38,13 +38,32 @@ export const saveToWordBank = (topic: string, difficulty: string, newWords: Word
         
         const merged = Array.from(map.values());
         
-        // Limit size to prevent localStorage overflow (keep last 200 words per topic)
-        const trimmed = merged.slice(0, 200);
+        // Limit size to prevent localStorage overflow (keep last 500 words per topic for deep offline play)
+        const trimmed = merged.slice(0, 500);
         
         localStorage.setItem(key, JSON.stringify(trimmed));
     } catch (e) {
         console.error("WordBank Write Error", e);
     }
+};
+
+export const getWordBankStats = (): Record<string, number> => {
+    const stats: Record<string, number> = {};
+    try {
+        for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (key && key.startsWith(WORD_BANK_PREFIX)) {
+                // Key format: popcross_words_Movies_Medium
+                const parts = key.replace(WORD_BANK_PREFIX, '').split('_');
+                const topic = parts[0];
+                const count = JSON.parse(localStorage.getItem(key) || '[]').length;
+                stats[topic] = (stats[topic] || 0) + count;
+            }
+        }
+    } catch (e) {
+        console.error("Stats Read Error", e);
+    }
+    return stats;
 };
 
 // --- Daily Puzzle Database ---
