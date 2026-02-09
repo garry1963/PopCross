@@ -35,10 +35,12 @@ export interface PuzzleData {
 
 export type Difficulty = 'Easy' | 'Medium' | 'Hard' | 'Expert';
 export type Region = 'Global' | 'USA' | 'UK';
+export type GenerationMode = 'online' | 'offline';
 
 export interface GameSettings {
   difficulty: Difficulty;
   region: Region;
+  generationMode: GenerationMode;
   soundEnabled: boolean;
   hapticEnabled: boolean;
 }
@@ -49,6 +51,7 @@ export interface Badge {
   icon: string;
   description: string;
   unlocked: boolean;
+  date?: string;
 }
 
 export interface UserStats {
@@ -84,7 +87,7 @@ export type TopicId =
   | 'Movies' | 'TV Shows' | 'Music' 
   | '90s' | '2000s' | 'Modern' 
   | 'Horror' | 'Sci-Fi' | 'Comedy' 
-  | 'Hip-Hop' | 'Rock' | 'Pop Divas' 
+  | 'Crime' | 'Rock' | 'Pop Divas' 
   | 'Superheroes' | 'Reality TV' | 'Anime';
 
 export interface Category {

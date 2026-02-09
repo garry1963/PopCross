@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { GameState, CellData, Direction, TopicId, Category, GameSettings, UserStats, Badge, Clue, Region } from './types';
+import { GameState, CellData, Direction, TopicId, Category, GameSettings, UserStats, Badge, Clue, Region, GenerationMode } from './types';
 import { generatePuzzle, getHintForCell, checkApiHealth } from './services/geminiService';
 import { getDailyPuzzleFromDb, saveDailyPuzzleToDb, saveGameState, loadGameState, clearGameState, getWordBankStats } from './services/storageService';
 import { scrapeCategoryWords } from './services/webScraperService';
@@ -10,7 +10,7 @@ import {
   Share2, Play, Zap, Calendar, Globe, Eye, Type, AlertCircle,
   Home, Grid, User, Settings, Skull, Mic2, Star, Disc, Film, Gamepad2, Volume2, VolumeX, Medal,
   Laugh, Guitar, Sword, Smartphone, Check, Eye as EyeIcon, Type as TypeIcon, Hash, ArrowLeft, Brain, BookOpen, MapPin, Flag,
-  Download, Database, WifiOff
+  Download, Database, WifiOff, Wifi, Siren
 } from 'lucide-react';
 
 // --- Configuration & Data ---
@@ -27,7 +27,7 @@ const CATEGORIES: Category[] = [
   { id: 'Horror', label: 'Horror', icon: <Skull size={20}/>, color: 'text-red-500', description: 'Spooky Season' },
   { id: 'Sci-Fi', label: 'Sci-Fi', icon: <Globe size={20}/>, color: 'text-green-400', description: 'Space & Future' },
   { id: 'Comedy', label: 'Comedy', icon: <Laugh size={20}/>, color: 'text-orange-400', description: 'Sitcoms & Stand-up' },
-  { id: 'Hip-Hop', label: 'Hip-Hop', icon: <Disc size={20}/>, color: 'text-amber-400', description: 'Bars & Beats' },
+  { id: 'Crime', label: 'True Crime', icon: <Siren size={20}/>, color: 'text-red-600', description: 'Detectives & Mysteries' },
   { id: 'Rock', label: 'Rock', icon: <Guitar size={20}/>, color: 'text-rose-400', description: 'Legends & Anthems' },
   { id: 'Pop Divas', label: 'Pop Divas', icon: <Mic2 size={20}/>, color: 'text-fuchsia-400', description: 'Queens of Pop' },
   { id: 'Superheroes', label: 'Heroes', icon: <Zap size={20}/>, color: 'text-blue-500', description: 'Marvel & DC' },
@@ -58,6 +58,7 @@ const INITIAL_STATS: UserStats = {
 const INITIAL_SETTINGS: GameSettings = {
     difficulty: 'Medium',
     region: 'Global',
+    generationMode: 'online',
     soundEnabled: true,
     hapticEnabled: true
 };
@@ -100,6 +101,8 @@ export default function App() {
   const [wordBankStats, setWordBankStats] = useState<Record<string, number>>({});
   const [isScraping, setIsScraping] = useState<string | null>(null);
   const [scrapeProgress, setScrapeProgress] = useState("");
+  
+  const hasAutoSynced = useRef(false);
 
   // --- Persistence ---
   useEffect(() => {
@@ -138,6 +141,46 @@ export default function App() {
     window.addEventListener('beforeunload', handleBeforeUnload);
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, [gameState]);
+
+  // --- Auto-Sync Logic ---
+  useEffect(() => {
+    if (apiStatus === 'ok' && !hasAutoSynced.current) {
+        hasAutoSynced.current = true;
+
+        const performSync = async () => {
+             // 1. Identify categories that need content (Empty or Low)
+             const stats = getWordBankStats();
+             const catsToUpdate = CATEGORIES.filter(c => (stats[c.id] || 0) < 50);
+
+             if (catsToUpdate.length === 0) return;
+
+             // Prioritize completely empty ones
+             catsToUpdate.sort((a, b) => (stats[a.id] || 0) - (stats[b.id] || 0));
+
+             // Process queue
+             for (const cat of catsToUpdate) {
+                 setIsScraping(cat.id);
+                 setScrapeProgress("Auto-syncing...");
+                 
+                 try {
+                     await scrapeCategoryWords(cat.id);
+                     setWordBankStats(getWordBankStats());
+                 } catch (e) {
+                     console.warn(`Auto-sync failed for ${cat.id}`, e);
+                 }
+                 
+                 // Rate limit protection
+                 await new Promise(r => setTimeout(r, 2000));
+             }
+             
+             setIsScraping(null);
+             setScrapeProgress("");
+        };
+        
+        // Start sync after short delay
+        setTimeout(performSync, 1000);
+    }
+  }, [apiStatus]);
 
   // --- Game Loop ---
   useEffect(() => {
@@ -311,7 +354,10 @@ export default function App() {
     // 2. Fallback to API Generation
     try {
       const theme = isDaily ? "Daily Mix" : topic;
-      const puzzle = await generatePuzzle(theme, gameState.settings.difficulty, gameState.settings.region);
+      // Force offline mode if setting is enabled
+      const forceOffline = gameState.settings.generationMode === 'offline';
+      
+      const puzzle = await generatePuzzle(theme, gameState.settings.difficulty, gameState.settings.region, forceOffline);
       
       // Cache the result if it's the daily puzzle
       if (isDaily) {
@@ -739,9 +785,9 @@ export default function App() {
 
                 <div className="flex flex-col items-center gap-2 mb-3">
                    {/* API Status */}
-                   <div className={`px-3 py-1 rounded-full border flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest transition-colors ${apiStatus === 'ok' ? 'bg-emerald-950/50 border-emerald-500/30 text-emerald-400' : (apiStatus === 'error' ? 'bg-red-950/50 border-red-500/30 text-red-400' : 'bg-slate-900 border-slate-800 text-slate-500')}`}>
-                        <div className={`w-1.5 h-1.5 rounded-full ${apiStatus === 'ok' ? 'bg-emerald-400 shadow-[0_0_5px_currentColor]' : (apiStatus === 'error' ? 'bg-red-500 animate-pulse' : 'bg-slate-500 animate-pulse')}`}></div>
-                        {apiStatus === 'checking' ? 'System Check...' : (apiStatus === 'ok' ? 'API Connected' : 'Connection Failed')}
+                   <div className={`px-3 py-1 rounded-full border flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest transition-colors ${apiStatus === 'ok' ? (isScraping ? 'bg-cyan-950/50 border-cyan-500/30 text-cyan-400' : 'bg-emerald-950/50 border-emerald-500/30 text-emerald-400') : (apiStatus === 'error' ? 'bg-red-950/50 border-red-500/30 text-red-400' : 'bg-slate-900 border-slate-800 text-slate-500')}`}>
+                        <div className={`w-1.5 h-1.5 rounded-full ${apiStatus === 'ok' ? (isScraping ? 'bg-cyan-400 animate-pulse' : 'bg-emerald-400 shadow-[0_0_5px_currentColor]') : (apiStatus === 'error' ? 'bg-red-500 animate-pulse' : 'bg-slate-500 animate-pulse')}`}></div>
+                        {apiStatus === 'checking' ? 'System Check...' : (apiStatus === 'ok' ? (isScraping ? `Updating ${CATEGORIES.find(c=>c.id===isScraping)?.label}...` : 'API Connected') : 'Connection Failed')}
                    </div>
                    
                    {/* Points Pill */}
@@ -856,6 +902,25 @@ export default function App() {
                             <span>{r.label}</span>
                         </button>
                     ))}
+                </div>
+            </div>
+
+            {/* Generation Mode Selector */}
+            <div className="flex flex-col gap-2 mt-2">
+                <span className="text-[10px] uppercase font-bold text-slate-500 tracking-widest">Generation Mode</span>
+                <div className="flex bg-slate-900 p-1 rounded-full border border-slate-800 w-fit">
+                    <button 
+                       onClick={() => setGameState(p => ({...p, settings: {...p.settings, generationMode: 'online'}}))}
+                       className={`px-4 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-wider transition-all flex items-center gap-2 ${gameState.settings.generationMode === 'online' ? 'bg-fuchsia-600 text-white shadow-lg' : 'text-slate-500 hover:text-white'}`}
+                    >
+                       <Wifi size={12}/> Online (AI)
+                    </button>
+                    <button 
+                       onClick={() => setGameState(p => ({...p, settings: {...p.settings, generationMode: 'offline'}}))}
+                       className={`px-4 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-wider transition-all flex items-center gap-2 ${gameState.settings.generationMode === 'offline' ? 'bg-emerald-600 text-white shadow-lg' : 'text-slate-500 hover:text-white'}`}
+                    >
+                       <WifiOff size={12}/> Offline (Fast)
+                    </button>
                 </div>
             </div>
           </div>

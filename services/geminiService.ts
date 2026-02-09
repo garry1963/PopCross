@@ -21,7 +21,7 @@ const TOPIC_INSTRUCTIONS: Record<string, string> = {
     'Horror': 'Focus on horror movie villains, monsters, specific slasher films, halloween tropes, and spooky terminology.',
     'Sci-Fi': 'Focus on space, aliens, future technology, Star Wars/Trek references, and science fiction concepts.',
     'Comedy': 'Focus on famous comedians, sitcom titles, funny movie quotes, and types of humor.',
-    'Hip-Hop': 'Focus on rappers, hip-hop slang, breakdancing, DJing, and classic albums.',
+    'Crime': 'Focus on true crime terminology, famous detectives, forensic science terms, heist movies, and mystery novels.',
     'Rock': 'Focus on rock bands, electric guitars, famous drummers, and rock anthems.',
     'Pop Divas': 'Focus strictly on famous female pop singers (Madonna, Beyonce, Taylor, etc) and their specific hit songs.',
     'Superheroes': 'Focus on Marvel/DC character names, super powers, villains, and comic book terms.',
@@ -110,19 +110,30 @@ const DIFFICULTY_CONFIG: Record<Difficulty, DifficultyProfile> = {
 };
 
 // 1. Fetch Word List
-const fetchWordList = async (topic: string, difficulty: Difficulty, region: Region): Promise<WordItem[]> => {
+const fetchWordList = async (topic: string, difficulty: Difficulty, region: Region, forceOffline: boolean): Promise<WordItem[]> => {
     const config = DIFFICULTY_CONFIG[difficulty];
     
     // A. Check Local Word Bank First
     const cachedWords = getWordBank(topic, difficulty);
     
+    // If Force Offline, strictly use cache (or backup if cache empty)
+    if (forceOffline) {
+        console.log(`Force Offline Mode: Using ${cachedWords.length} cached words.`);
+        if (cachedWords.length === 0) {
+            console.warn("Offline cache empty, using backup emergency words.");
+            return EMERGENCY_BACKUP_WORDS;
+        }
+        return cachedWords.sort(() => 0.5 - Math.random());
+    }
+
+    // B. Online/Hybrid Mode
     // Check if we have enough cached words to satisfy the fetchCount
     if (cachedWords.length >= config.fetchCount) {
         console.log(`Using Cached Words for ${difficulty} (${cachedWords.length} avail)`);
         return cachedWords.sort(() => 0.5 - Math.random()); 
     }
 
-    // B. If not enough cached, call AI
+    // C. API Call (If not forced offline and cache is low)
     console.log(`Fetching ${config.fetchCount} new words from AI for ${difficulty}...`);
     
     const specificInstruction = TOPIC_INSTRUCTIONS[topic] || `Focus strictly on ${topic}.`;
@@ -380,12 +391,12 @@ const generateLayout = (wordList: WordItem[], size: number): PuzzleData | null =
     };
 };
 
-export const generatePuzzle = async (topic: string, difficulty: Difficulty, region: Region): Promise<PuzzleData> => {
+export const generatePuzzle = async (topic: string, difficulty: Difficulty, region: Region, forceOffline: boolean = false): Promise<PuzzleData> => {
     const config = DIFFICULTY_CONFIG[difficulty];
     
     let words: WordItem[] = [];
     try {
-        words = await fetchWordList(topic, difficulty, region);
+        words = await fetchWordList(topic, difficulty, region, forceOffline);
     } catch (e) {
         console.error("Critical error in fetchWordList", e);
         // Fallback to emergency words if everything blows up
