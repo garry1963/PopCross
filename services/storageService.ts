@@ -39,7 +39,9 @@ export const saveToWordBank = (topic: string, difficulty: string, newWords: Word
         const merged = Array.from(map.values());
         
         // Limit size to prevent localStorage overflow (keep last 500 words per topic for deep offline play)
-        const trimmed = merged.slice(0, 500);
+        // Fix: Use slice with negative index to keep the MOST RECENT additions (tail of the array)
+        // existing items are at the start, new items are appended at the end.
+        const trimmed = merged.length > 500 ? merged.slice(-500) : merged;
         
         localStorage.setItem(key, JSON.stringify(trimmed));
     } catch (e) {

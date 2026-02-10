@@ -10,7 +10,7 @@ import {
   Share2, Play, Zap, Calendar, Globe, Eye, Type, AlertCircle,
   Home, Grid, User, Settings, Skull, Mic2, Star, Disc, Film, Gamepad2, Volume2, VolumeX, Medal,
   Laugh, Guitar, Sword, Smartphone, Check, Eye as EyeIcon, Type as TypeIcon, Hash, ArrowLeft, Brain, BookOpen, MapPin, Flag,
-  Download, Database, WifiOff, Wifi, Siren
+  Download, Database, WifiOff, Wifi, Siren, AlertTriangle
 } from 'lucide-react';
 
 // --- Configuration & Data ---
@@ -95,7 +95,7 @@ export default function App() {
   const [isAiThinking, setIsAiThinking] = useState(false);
   const [savedGameExists, setSavedGameExists] = useState(false);
   const [showRevealMenu, setShowRevealMenu] = useState(false);
-  const [apiStatus, setApiStatus] = useState<'checking' | 'ok' | 'error'>('checking');
+  const [apiStatus, setApiStatus] = useState<'checking' | 'ok' | 'error' | 'quota-exceeded'>('checking');
   
   // Scraper State
   const [wordBankStats, setWordBankStats] = useState<Record<string, number>>({});
@@ -142,15 +142,32 @@ export default function App() {
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, [gameState]);
 
+  // --- Auto-Sync Recovery (Quota) ---
+  useEffect(() => {
+      let interval: any;
+      if (apiStatus === 'quota-exceeded') {
+          // Poll every 15 seconds to check if API is back
+          interval = setInterval(async () => {
+              const healthy = await checkApiHealth();
+              if (healthy) {
+                  setApiStatus('ok');
+                  hasAutoSynced.current = false; // Reset to allow sync to try again
+              }
+          }, 15000);
+      }
+      return () => clearInterval(interval);
+  }, [apiStatus]);
+
   // --- Auto-Sync Logic ---
   useEffect(() => {
     if (apiStatus === 'ok' && !hasAutoSynced.current) {
         hasAutoSynced.current = true;
 
         const performSync = async () => {
-             // 1. Identify categories that need content (Empty or Low)
+             // 1. Identify categories that need content
              const stats = getWordBankStats();
-             const catsToUpdate = CATEGORIES.filter(c => (stats[c.id] || 0) < 50);
+             // Requirement: Ensure all have at least 100 words
+             const catsToUpdate = CATEGORIES.filter(c => (stats[c.id] || 0) < 100);
 
              if (catsToUpdate.length === 0) return;
 
@@ -175,8 +192,15 @@ export default function App() {
                  try {
                      await scrapeCategoryWords(cat.id);
                      setWordBankStats(getWordBankStats());
-                 } catch (e) {
+                 } catch (e: any) {
                      console.warn(`Auto-sync failed for ${cat.id}`, e);
+                     if (e.message === 'QUOTA_EXCEEDED') {
+                         setApiStatus('quota-exceeded');
+                         setIsScraping(null);
+                         setScrapeProgress("");
+                         hasAutoSynced.current = false; // Allow retry later
+                         return; // STOP SYNC
+                     }
                  }
                  
                  // Rate limit protection
@@ -284,7 +308,7 @@ export default function App() {
       };
   };
 
-  const initGameFromPuzzle = (puzzle: any, isDaily: boolean, prevGameState: any) => {
+  const initGameFromPuzzle = (puzzle: any, isDaily: boolean) => {
       const newGrid: CellData[][] = puzzle.grid.map((row: string[], r: number) => 
         row.map((char: string, c: number) => ({
           row: r,
@@ -317,27 +341,50 @@ export default function App() {
               }
           }
       }
+      
+      // Update state securely using functional update to ensure we don't overwrite
+      // any background updates (like settings changes) that happened during generation.
+      setGameState(prev => {
+          // Prepare new state
+          const newState = {
+            ...prev,
+            status: 'playing',
+            puzzle,
+            grid: newGrid,
+            selectedCell: { row: startR, col: startC },
+            direction: 'across',
+            timer: 0,
+            hintsUsed: 0,
+            revealsUsed: 0,
+            score: 0,
+            isDaily,
+            view: 'game'
+          } as GameState;
 
-      const newState: GameState = {
-        ...prevGameState,
-        status: 'playing',
-        puzzle,
-        grid: newGrid,
-        selectedCell: { row: startR, col: startC },
-        direction: 'across',
-        timer: 0,
-        hintsUsed: 0,
-        revealsUsed: 0,
-        score: 0,
-        isDaily,
-        view: 'game'
-      };
-
-      setGameState(newState);
-      updateSelectionHighlights(newGrid, { row: startR, col: startC }, 'across', newState);
+          // Inline highlight logic here to ensure it uses the freshest grid state
+          if (newState.selectedCell) {
+             const r = newState.selectedCell.row;
+             const c = newState.selectedCell.col;
+             newState.grid[r][c].active = true;
+             
+             // Simple horizontal highlight as default
+             let colIter = c;
+             while(colIter >= 0 && !newState.grid[r][colIter].isBlack) { newState.grid[r][colIter].related = true; colIter--; }
+             colIter = c + 1;
+             while(colIter < newState.grid.length && !newState.grid[r][colIter].isBlack) { newState.grid[r][colIter].related = true; colIter++; }
+          }
+          
+          return newState;
+      });
   }
 
   const startNewGame = async (topic: string, isDaily: boolean = false) => {
+    // Prevent start if quota exceeded (unless offline mode forced, but let's keep it strict for now or allow offline fallback)
+    if (apiStatus === 'quota-exceeded' && gameState.settings.generationMode === 'online') {
+        alert("API Usage Exceeded. Please wait or switch to Offline mode.");
+        return;
+    }
+
     setGameState(prev => ({ 
       ...prev, 
       status: 'generating', 
@@ -356,7 +403,7 @@ export default function App() {
         const cachedDaily = getDailyPuzzleFromDb();
         if (cachedDaily) {
             console.log("Loading Daily from Cache");
-            initGameFromPuzzle(cachedDaily, true, gameState);
+            initGameFromPuzzle(cachedDaily, true);
             return;
         }
     }
@@ -394,12 +441,18 @@ export default function App() {
           saveDailyPuzzleToDb(puzzle);
       }
 
-      initGameFromPuzzle(puzzle, isDaily, gameState);
+      initGameFromPuzzle(puzzle, isDaily);
 
     } catch (error: any) {
       console.error(error);
       setGameState(prev => ({ ...prev, status: 'idle', view: 'home' }));
-      alert(error.message || "Failed to generate puzzle. Please check your network or API key.");
+      
+      if (error.message?.includes("QUOTA") || error.message?.includes("429")) {
+          setApiStatus('quota-exceeded');
+          alert("Daily API Limit Reached. Game switched to Offline mode for future attempts.");
+      } else {
+          alert(error.message || "Failed to generate puzzle. Please check your network or API key.");
+      }
     }
   };
 
@@ -764,6 +817,13 @@ export default function App() {
   // Scraper Action
   const handleScrape = async (categoryId: string) => {
       if (isScraping) return;
+      
+      // Prevent manual scrape if quota exceeded
+      if (apiStatus === 'quota-exceeded') {
+          alert("Cannot update. API Usage Exceeded.");
+          return;
+      }
+
       setIsScraping(categoryId);
       setScrapeProgress("Starting...");
       
@@ -776,7 +836,10 @@ export default function App() {
               setIsScraping(null);
               setScrapeProgress("");
           }, 1500);
-      } catch (e) {
+      } catch (e: any) {
+          if (e.message === 'QUOTA_EXCEEDED') {
+              setApiStatus('quota-exceeded');
+          }
           setScrapeProgress("Failed.");
           setTimeout(() => {
               setIsScraping(null);
@@ -806,6 +869,48 @@ export default function App() {
 
   const HomeView = () => {
       const isDailyDone = stats.lastDailyDate === new Date().toISOString().split('T')[0];
+      
+      const getStatusBadge = () => {
+          if (apiStatus === 'ok') {
+              if (isScraping) {
+                   return (
+                       <div className="bg-cyan-950/50 border-cyan-500/30 text-cyan-400 px-3 py-1 rounded-full border flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest">
+                           <div className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse"></div>
+                           Updating {CATEGORIES.find(c=>c.id===isScraping)?.label}...
+                       </div>
+                   );
+              }
+              return (
+                   <div className="bg-emerald-950/50 border-emerald-500/30 text-emerald-400 px-3 py-1 rounded-full border flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest">
+                       <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_5px_currentColor]"></div>
+                       API Connected
+                   </div>
+              );
+          }
+          if (apiStatus === 'quota-exceeded') {
+               return (
+                   <div className="bg-amber-950/50 border-amber-500/30 text-amber-400 px-3 py-1 rounded-full border flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest">
+                       <AlertTriangle size={12} className="animate-pulse" />
+                       API Usage Exceeded
+                   </div>
+               );
+          }
+          if (apiStatus === 'error') {
+               return (
+                   <div className="bg-red-950/50 border-red-500/30 text-red-400 px-3 py-1 rounded-full border flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest">
+                       <div className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></div>
+                       Connection Failed
+                   </div>
+               );
+          }
+          return (
+                <div className="bg-slate-900 border-slate-800 text-slate-500 px-3 py-1 rounded-full border flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest">
+                   <div className="w-1.5 h-1.5 rounded-full bg-slate-500 animate-pulse"></div>
+                   System Check...
+               </div>
+          );
+      };
+
       return (
           <div className="flex flex-col gap-8 w-full max-w-lg mx-auto pb-24 animate-[fade-in_0.5s_ease-out]">
              {/* Header Hero Section */}
@@ -815,10 +920,7 @@ export default function App() {
 
                 <div className="flex flex-col items-center gap-2 mb-3">
                    {/* API Status */}
-                   <div className={`px-3 py-1 rounded-full border flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest transition-colors ${apiStatus === 'ok' ? (isScraping ? 'bg-cyan-950/50 border-cyan-500/30 text-cyan-400' : 'bg-emerald-950/50 border-emerald-500/30 text-emerald-400') : (apiStatus === 'error' ? 'bg-red-950/50 border-red-500/30 text-red-400' : 'bg-slate-900 border-slate-800 text-slate-500')}`}>
-                        <div className={`w-1.5 h-1.5 rounded-full ${apiStatus === 'ok' ? (isScraping ? 'bg-cyan-400 animate-pulse' : 'bg-emerald-400 shadow-[0_0_5px_currentColor]') : (apiStatus === 'error' ? 'bg-red-500 animate-pulse' : 'bg-slate-500 animate-pulse')}`}></div>
-                        {apiStatus === 'checking' ? 'System Check...' : (apiStatus === 'ok' ? (isScraping ? `Updating ${CATEGORIES.find(c=>c.id===isScraping)?.label}...` : 'API Connected') : 'Connection Failed')}
-                   </div>
+                   {getStatusBadge()}
                    
                    {/* Points Pill */}
                    <div className="px-4 py-1.5 rounded-full bg-slate-900/80 border border-white/10 flex items-center gap-2 shadow-lg backdrop-blur-md hover:border-yellow-500/50 transition-colors cursor-default">
@@ -980,10 +1082,11 @@ export default function App() {
                             </div>
                             <button 
                                 onClick={() => handleScrape(cat.id)}
-                                disabled={!!isScraping}
+                                disabled={!!isScraping || apiStatus === 'quota-exceeded'}
                                 className={`px-3 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-wide flex items-center gap-2 transition-colors
                                 ${count > 50 ? 'bg-emerald-900/30 text-emerald-400 border border-emerald-500/30' : 'bg-slate-800 text-slate-400 border border-slate-700 hover:bg-slate-700 hover:text-white'}
-                                ${isDownloading ? 'animate-pulse cursor-wait' : ''}`}
+                                ${isDownloading ? 'animate-pulse cursor-wait' : ''}
+                                ${apiStatus === 'quota-exceeded' ? 'opacity-50 cursor-not-allowed' : ''}`}
                             >
                                 {isDownloading ? (
                                     <><Loader2 size={12} className="animate-spin" /> {scrapeProgress}</>

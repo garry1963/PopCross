@@ -15,7 +15,8 @@ export const scrapeCategoryWords = async (
     // We scrape for 'Medium' difficulty as a baseline, as it fits most grids.
     // The game logic can filter these for Easy/Hard based on length later.
     const TARGET_DIFFICULTY: Difficulty = 'Medium'; 
-    const BATCH_SIZE = 50;
+    // Increased to 100 to meet new requirement and minimize API calls
+    const BATCH_SIZE = 100;
 
     onProgress?.(`Initializing web scraper for ${category}...`);
 
@@ -27,7 +28,7 @@ export const scrapeCategoryWords = async (
         3. Create exactly ${BATCH_SIZE} unique pairings of (Answer, Clue).
         
         Constraints:
-        - Answers must be single words or merged phrases (e.g., "STARWARS", "BRADPITT").
+        - Answers must be single words or merged phrases (e.g. "STARWARS", "BRADPITT").
         - Uppercase answers only.
         - No special characters.
         - Length: 3 to 12 letters.
@@ -98,7 +99,13 @@ export const scrapeCategoryWords = async (
 
         return validWords.length;
 
-    } catch (e) {
+    } catch (e: any) {
+        // Handle Quota Limits specifically
+        const errStr = JSON.stringify(e);
+        if (errStr.includes("429") || e.status === 429 || e.message?.includes("quota") || errStr.includes("RESOURCE_EXHAUSTED")) {
+             throw new Error("QUOTA_EXCEEDED");
+        }
+        
         console.error("Scraping Failed", e);
         throw e;
     }
