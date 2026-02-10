@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { GameState, CellData, Direction, TopicId, Category, GameSettings, UserStats, Badge, Clue, Region, GenerationMode } from './types';
+import { GameState, CellData, Direction, TopicId, Category, GameSettings, UserStats, Badge, Clue, Region, GenerationMode, Difficulty } from './types';
 import { generatePuzzle, getHintForCell, checkApiHealth } from './services/geminiService';
 import { getDailyPuzzleFromDb, saveDailyPuzzleToDb, saveGameState, loadGameState, clearGameState, getWordBankStats } from './services/storageService';
 import { scrapeCategoryWords } from './services/webScraperService';
@@ -154,8 +154,18 @@ export default function App() {
 
              if (catsToUpdate.length === 0) return;
 
-             // Prioritize completely empty ones
-             catsToUpdate.sort((a, b) => (stats[a.id] || 0) - (stats[b.id] || 0));
+             // Prioritize completely empty ones first, then by lowest count
+             catsToUpdate.sort((a, b) => {
+                 const countA = stats[a.id] || 0;
+                 const countB = stats[b.id] || 0;
+                 
+                 // Explicit priority for empty categories
+                 if (countA === 0 && countB > 0) return -1;
+                 if (countB === 0 && countA > 0) return 1;
+                 
+                 // Otherwise sort by scarcity (ascending)
+                 return countA - countB;
+             });
 
              // Process queue
              for (const cat of catsToUpdate) {
@@ -353,12 +363,32 @@ export default function App() {
 
     // 2. Fallback to API Generation
     try {
-      const theme = isDaily ? "Daily Mix" : topic;
+      let targetTopic = topic;
+      let targetDifficulty = gameState.settings.difficulty;
+      let displayTheme = topic;
+
+      if (isDaily) {
+          // Select Random Category
+          const randomCat = CATEGORIES[Math.floor(Math.random() * CATEGORIES.length)];
+          targetTopic = randomCat.id;
+
+          // Select Random Difficulty
+          const difficulties = Object.keys(POINTS_BY_DIFFICULTY) as Difficulty[];
+          targetDifficulty = difficulties[Math.floor(Math.random() * difficulties.length)];
+          
+          displayTheme = `Daily: ${randomCat.label} (${targetDifficulty})`;
+      }
+
       // Force offline mode if setting is enabled
       const forceOffline = gameState.settings.generationMode === 'offline';
       
-      const puzzle = await generatePuzzle(theme, gameState.settings.difficulty, gameState.settings.region, forceOffline);
+      const puzzle = await generatePuzzle(targetTopic, targetDifficulty, gameState.settings.region, forceOffline);
       
+      // Override theme for display
+      if (isDaily) {
+          puzzle.theme = displayTheme;
+      }
+
       // Cache the result if it's the daily puzzle
       if (isDaily) {
           saveDailyPuzzleToDb(puzzle);
@@ -817,7 +847,7 @@ export default function App() {
                      </div>
                      <div className="flex flex-col border-l border-white/10 pl-4">
                          <span className="text-slate-400 text-xs uppercase font-bold">Difficulty</span>
-                         <span className="text-xl font-mono text-white">Mixed</span>
+                         <span className="text-xl font-mono text-white">Random</span>
                      </div>
                  </div>
 
