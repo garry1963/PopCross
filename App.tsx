@@ -96,14 +96,13 @@ export default function App() {
   const [savedGameExists, setSavedGameExists] = useState(false);
   const [showRevealMenu, setShowRevealMenu] = useState(false);
   const [apiStatus, setApiStatus] = useState<'checking' | 'ok' | 'error' | 'quota-exceeded'>('checking');
+  const [quotaRenewed, setQuotaRenewed] = useState(false); // Track if we just recovered from quota exceeded
   
   // Scraper State
   const [wordBankStats, setWordBankStats] = useState<Record<string, number>>({});
   const [isScraping, setIsScraping] = useState<string | null>(null);
   const [scrapeProgress, setScrapeProgress] = useState("");
   
-  const hasAutoSynced = useRef(false);
-
   // --- Persistence ---
   useEffect(() => {
     const savedStats = localStorage.getItem('popcross_stats_v2');
@@ -151,69 +150,13 @@ export default function App() {
               const healthy = await checkApiHealth();
               if (healthy) {
                   setApiStatus('ok');
-                  hasAutoSynced.current = false; // Reset to allow sync to try again
+                  setQuotaRenewed(true);
+                  // Hide the renewed message after 10 seconds
+                  setTimeout(() => setQuotaRenewed(false), 10000);
               }
           }, 15000);
       }
       return () => clearInterval(interval);
-  }, [apiStatus]);
-
-  // --- Auto-Sync Logic ---
-  useEffect(() => {
-    if (apiStatus === 'ok' && !hasAutoSynced.current) {
-        hasAutoSynced.current = true;
-
-        const performSync = async () => {
-             // 1. Identify categories that need content
-             const stats = getWordBankStats();
-             // Requirement: Ensure all have at least 100 words
-             const catsToUpdate = CATEGORIES.filter(c => (stats[c.id] || 0) < 100);
-
-             if (catsToUpdate.length === 0) return;
-
-             // Prioritize completely empty ones first, then by lowest count
-             catsToUpdate.sort((a, b) => {
-                 const countA = stats[a.id] || 0;
-                 const countB = stats[b.id] || 0;
-                 
-                 // Explicit priority for empty categories
-                 if (countA === 0 && countB > 0) return -1;
-                 if (countB === 0 && countA > 0) return 1;
-                 
-                 // Otherwise sort by scarcity (ascending)
-                 return countA - countB;
-             });
-
-             // Process queue
-             for (const cat of catsToUpdate) {
-                 setIsScraping(cat.id);
-                 setScrapeProgress("Auto-syncing...");
-                 
-                 try {
-                     await scrapeCategoryWords(cat.id);
-                     setWordBankStats(getWordBankStats());
-                 } catch (e: any) {
-                     console.warn(`Auto-sync failed for ${cat.id}`, e);
-                     if (e.message === 'QUOTA_EXCEEDED') {
-                         setApiStatus('quota-exceeded');
-                         setIsScraping(null);
-                         setScrapeProgress("");
-                         hasAutoSynced.current = false; // Allow retry later
-                         return; // STOP SYNC
-                     }
-                 }
-                 
-                 // Rate limit protection
-                 await new Promise(r => setTimeout(r, 2000));
-             }
-             
-             setIsScraping(null);
-             setScrapeProgress("");
-        };
-        
-        // Start sync after short delay
-        setTimeout(performSync, 1000);
-    }
   }, [apiStatus]);
 
   // --- Game Loop ---
@@ -390,7 +333,7 @@ export default function App() {
       status: 'generating', 
       hintsUsed: 0, 
       revealsUsed: 0, 
-      timer: 0,
+      timer: 0, 
       score: 0,
       isDaily,
       view: 'game'
@@ -848,6 +791,55 @@ export default function App() {
       }
   };
 
+  const handleUpdateAll = async () => {
+       if (isScraping) return;
+       
+       if (apiStatus === 'quota-exceeded') {
+           alert("Cannot update. API Usage Exceeded.");
+           return;
+       }
+
+       const stats = getWordBankStats();
+       const catsToUpdate = CATEGORIES.filter(c => (stats[c.id] || 0) < 100);
+
+       if (catsToUpdate.length === 0) {
+           alert("All packs are ready!");
+           return;
+       }
+       
+       // Sort priority
+       catsToUpdate.sort((a, b) => {
+             const countA = stats[a.id] || 0;
+             const countB = stats[b.id] || 0;
+             if (countA === 0 && countB > 0) return -1;
+             if (countB === 0 && countA > 0) return 1;
+             return countA - countB;
+       });
+
+       setIsScraping("BATCH"); // Special ID for batch
+       setScrapeProgress("Starting Batch...");
+
+       for (const cat of catsToUpdate) {
+             setIsScraping(cat.id);
+             setScrapeProgress("Auto-fetching...");
+             try {
+                 await scrapeCategoryWords(cat.id);
+                 setWordBankStats(getWordBankStats());
+             } catch (e: any) {
+                 if (e.message === 'QUOTA_EXCEEDED') {
+                     setApiStatus('quota-exceeded');
+                     setIsScraping(null);
+                     setScrapeProgress("");
+                     return;
+                 }
+             }
+             await new Promise(r => setTimeout(r, 1000));
+       }
+       
+       setIsScraping(null);
+       setScrapeProgress("");
+  };
+
   // --- Views ---
 
   const Navbar = () => (
@@ -871,6 +863,14 @@ export default function App() {
       const isDailyDone = stats.lastDailyDate === new Date().toISOString().split('T')[0];
       
       const getStatusBadge = () => {
+          if (quotaRenewed) {
+               return (
+                   <div className="bg-emerald-900 border-emerald-400 text-emerald-100 px-3 py-1 rounded-full border flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest shadow-[0_0_15px_rgba(16,185,129,0.5)] animate-pulse">
+                       <Check size={12} />
+                       Quota Renewed - Online
+                   </div>
+               );
+          }
           if (apiStatus === 'ok') {
               if (isScraping) {
                    return (
@@ -1059,9 +1059,19 @@ export default function App() {
 
           {/* Scraper / Content Manager */}
           <div className="glass-panel p-4 rounded-xl border border-slate-800">
-             <div className="flex items-center gap-2 mb-3">
-                <Database size={18} className="text-emerald-400" />
-                <h2 className="text-sm font-bold uppercase tracking-widest text-slate-300">Offline Content Packs</h2>
+             <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                    <Database size={18} className="text-emerald-400" />
+                    <h2 className="text-sm font-bold uppercase tracking-widest text-slate-300">Offline Content Packs</h2>
+                </div>
+                <button 
+                    onClick={handleUpdateAll}
+                    disabled={!!isScraping || apiStatus === 'quota-exceeded'}
+                    className={`text-[10px] px-2 py-1 rounded border font-bold uppercase tracking-wider transition-all 
+                    ${!!isScraping ? 'text-slate-600 border-slate-800' : 'text-cyan-400 border-cyan-900/50 hover:bg-cyan-900/20 hover:text-cyan-300'}`}
+                >
+                    {isScraping ? 'Updating...' : 'Update All'}
+                </button>
              </div>
              <p className="text-xs text-slate-500 mb-4">Download word packs to play offline and reduce data usage. Scrapes authoritative web sources.</p>
              
@@ -1120,56 +1130,90 @@ export default function App() {
   );
 
   const ProfileView = () => (
-      <div className="flex flex-col gap-6 w-full max-w-lg mx-auto pb-24 animate-[fade-in_0.5s_ease-out]">
-           <div className="text-center mb-6">
-                <div className="w-24 h-24 mx-auto bg-gradient-to-br from-fuchsia-500 to-cyan-500 rounded-full p-1 mb-4 shadow-xl shadow-fuchsia-500/20">
-                    <div className="w-full h-full bg-slate-950 rounded-full flex items-center justify-center">
-                        <User size={40} className="text-white" />
-                    </div>
-                </div>
-                <h1 className="text-2xl font-bold text-white mb-1">Pop Culture Fan</h1>
-                <p className="text-slate-400 text-sm font-mono">Level {stats.level}</p>
-           </div>
+      <div className="flex flex-col gap-6 w-full max-w-2xl mx-auto pb-24 animate-[fade-in_0.5s_ease-out]">
+          <h1 className="text-3xl font-black italic tracking-tighter text-white mb-2">YOUR PROFILE</h1>
+          
+          {/* Main Stats Card */}
+          <div className="glass-panel p-6 rounded-xl flex flex-col gap-4 relative overflow-hidden">
+             <div className="absolute top-0 right-0 p-4 opacity-10">
+                 <Trophy size={120} className="text-yellow-400" />
+             </div>
+             
+             <div className="flex items-center gap-4 relative z-10">
+                 <div className="w-16 h-16 rounded-full bg-gradient-to-br from-fuchsia-500 to-purple-600 flex items-center justify-center text-2xl font-bold text-white shadow-lg ring-4 ring-white/10">
+                     {stats.level}
+                 </div>
+                 <div>
+                     <div className="text-xs font-bold text-slate-400 uppercase tracking-widest">Level</div>
+                     <div className="text-2xl font-black text-white">Puzzle Master</div>
+                 </div>
+             </div>
+             
+             {/* XP Bar */}
+             <div className="relative z-10">
+                 <div className="flex justify-between text-[10px] font-bold uppercase text-slate-400 mb-1">
+                     <span>XP Progress</span>
+                     <span>{Math.floor(stats.xp)} / {stats.xpToNextLevel}</span>
+                 </div>
+                 <div className="h-3 bg-slate-900 rounded-full overflow-hidden border border-white/5">
+                     <div 
+                        className="h-full bg-gradient-to-r from-fuchsia-500 to-purple-500 transition-all duration-500"
+                        style={{ width: `${Math.min(100, (stats.xp / stats.xpToNextLevel) * 100)}%` }}
+                     ></div>
+                 </div>
+             </div>
 
-           {/* XP Bar */}
-           <div className="glass-panel p-4 rounded-xl">
-               <div className="flex justify-between text-xs font-bold text-slate-400 mb-2 uppercase tracking-wider">
-                   <span>XP Progress</span>
-                   <span>{stats.xp} / {stats.xpToNextLevel}</span>
-               </div>
-               <div className="h-3 bg-slate-800 rounded-full overflow-hidden">
-                   <div 
-                    className="h-full bg-gradient-to-r from-fuchsia-500 to-cyan-500" 
-                    style={{ width: `${Math.min(100, (stats.xp / stats.xpToNextLevel) * 100)}%` }}
-                   ></div>
-               </div>
-           </div>
+             <div className="grid grid-cols-2 gap-4 mt-2 relative z-10">
+                 <div className="p-3 bg-slate-900/50 rounded-lg border border-white/5">
+                     <div className="text-[10px] font-bold text-slate-500 uppercase">Total Score</div>
+                     <div className="text-xl font-mono text-white">{stats.totalPoints.toLocaleString()}</div>
+                 </div>
+                 <div className="p-3 bg-slate-900/50 rounded-lg border border-white/5">
+                     <div className="text-[10px] font-bold text-slate-500 uppercase">Games Won</div>
+                     <div className="text-xl font-mono text-white">{stats.gamesWon} <span className="text-slate-500 text-xs">/ {stats.gamesPlayed}</span></div>
+                 </div>
+             </div>
+          </div>
 
-           {/* Stats Grid */}
-           <div className="grid grid-cols-2 gap-3">
-               <div className="glass-panel p-4 rounded-xl flex flex-col items-center">
-                   <Trophy size={20} className="text-yellow-400 mb-2"/>
-                   <span className="text-2xl font-black text-white">{stats.gamesWon}</span>
-                   <span className="text-[10px] uppercase font-bold text-slate-500">Wins</span>
-               </div>
-               <div className="glass-panel p-4 rounded-xl flex flex-col items-center">
-                   <Zap size={20} className="text-cyan-400 mb-2"/>
-                   <span className="text-2xl font-black text-white">{stats.maxStreak}</span>
-                   <span className="text-[10px] uppercase font-bold text-slate-500">Max Streak</span>
-               </div>
-           </div>
+          {/* Badges Section */}
+          <div>
+              <h3 className="text-sm font-bold text-slate-500 uppercase tracking-widest mb-3">Achievements</h3>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  {stats.badges.map(badge => (
+                      <div 
+                        key={badge.id} 
+                        className={`p-3 rounded-xl border flex flex-col items-center text-center gap-2 transition-all
+                        ${badge.unlocked 
+                            ? 'bg-gradient-to-br from-slate-800 to-slate-900 border-yellow-500/30 shadow-[0_0_15px_rgba(234,179,8,0.1)]' 
+                            : 'bg-slate-900/50 border-slate-800 opacity-50 grayscale'
+                        }`}
+                      >
+                          <div className="text-2xl">{badge.icon}</div>
+                          <div>
+                              <div className={`text-xs font-bold ${badge.unlocked ? 'text-white' : 'text-slate-500'}`}>{badge.name}</div>
+                              <div className="text-[9px] text-slate-500 leading-tight mt-1">{badge.description}</div>
+                          </div>
+                      </div>
+                  ))}
+              </div>
+          </div>
 
-           {/* Badges */}
-           <div>
-               <h3 className="text-sm font-bold text-slate-500 uppercase tracking-widest mb-3">Badges</h3>
-               <div className="grid grid-cols-4 gap-2">
-                   {stats.badges.map(badge => (
-                       <div key={badge.id} className={`aspect-square rounded-xl flex items-center justify-center text-2xl border ${badge.unlocked ? 'bg-slate-800 border-white/20' : 'bg-slate-900/50 border-white/5 opacity-30 grayscale'}`}>
-                           {badge.icon}
-                       </div>
-                   ))}
-               </div>
-           </div>
+          {/* Streak Section */}
+           <div className="glass-panel p-4 rounded-xl flex items-center justify-between border border-orange-500/20 bg-orange-900/10">
+              <div className="flex items-center gap-3">
+                  <div className="p-2 bg-orange-500/20 rounded-lg text-orange-400">
+                      <Zap size={24} />
+                  </div>
+                  <div>
+                      <div className="text-xs font-bold text-orange-200 uppercase tracking-widest">Current Streak</div>
+                      <div className="text-2xl font-black text-white">{stats.currentStreak} Days</div>
+                  </div>
+              </div>
+              <div className="text-right">
+                  <div className="text-[10px] font-bold text-orange-200/50 uppercase">Best</div>
+                  <div className="text-lg font-mono text-orange-200">{stats.maxStreak}</div>
+              </div>
+          </div>
       </div>
   );
 

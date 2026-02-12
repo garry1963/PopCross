@@ -58,8 +58,14 @@ export const getWordBankStats = (): Record<string, number> => {
                 // Key format: popcross_words_Movies_Medium
                 const parts = key.replace(WORD_BANK_PREFIX, '').split('_');
                 const topic = parts[0];
+                
+                // Get count for this specific difficulty bucket
                 const count = JSON.parse(localStorage.getItem(key) || '[]').length;
-                stats[topic] = (stats[topic] || 0) + count;
+                
+                // We take the MAX count across difficulties to represent the "Words Cached" for the topic.
+                // Since scraping saves identical lists to Easy/Med/Hard, Max avoids triple counting.
+                // If the user only played Hard online, Max will correctly show that count.
+                stats[topic] = Math.max((stats[topic] || 0), count);
             }
         }
     } catch (e) {
