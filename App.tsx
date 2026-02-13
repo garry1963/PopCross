@@ -800,10 +800,12 @@ export default function App() {
        }
 
        const stats = getWordBankStats();
-       const catsToUpdate = CATEGORIES.filter(c => (stats[c.id] || 0) < 100);
+       // Only auto-update topics that have fewer than 200 words cached, 
+       // since we now fetch 300+ in a single batch.
+       const catsToUpdate = CATEGORIES.filter(c => (stats[c.id] || 0) < 200);
 
        if (catsToUpdate.length === 0) {
-           alert("All packs are ready!");
+           alert("All packs are fully stocked!");
            return;
        }
        
@@ -817,11 +819,11 @@ export default function App() {
        });
 
        setIsScraping("BATCH"); // Special ID for batch
-       setScrapeProgress("Starting Batch...");
+       setScrapeProgress("Starting Deep Scan...");
 
        for (const cat of catsToUpdate) {
              setIsScraping(cat.id);
-             setScrapeProgress("Auto-fetching...");
+             setScrapeProgress("Fetching Data...");
              try {
                  await scrapeCategoryWords(cat.id);
                  setWordBankStats(getWordBankStats());
@@ -833,6 +835,7 @@ export default function App() {
                      return;
                  }
              }
+             // Add a small delay between efficient large batches to be polite
              await new Promise(r => setTimeout(r, 1000));
        }
        
@@ -876,7 +879,7 @@ export default function App() {
                    return (
                        <div className="bg-cyan-950/50 border-cyan-500/30 text-cyan-400 px-3 py-1 rounded-full border flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest">
                            <div className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse"></div>
-                           Updating {CATEGORIES.find(c=>c.id===isScraping)?.label}...
+                           Deep Scanning {CATEGORIES.find(c=>c.id===isScraping)?.label}...
                        </div>
                    );
               }
