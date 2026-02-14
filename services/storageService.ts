@@ -49,6 +49,16 @@ export const saveToWordBank = (topic: string, difficulty: string, newWords: Word
     }
 };
 
+export const addCustomWord = (topic: string, word: string, clue: string) => {
+    const item: WordItem = { answer: word.toUpperCase(), clue };
+    // We add the word to ALL difficulty buckets. 
+    // The game engine filters by length at runtime, so it will appear in the correct difficulty automatically.
+    const difficulties = ['Easy', 'Medium', 'Hard', 'Expert'];
+    difficulties.forEach(diff => {
+        saveToWordBank(topic, diff, [item]);
+    });
+};
+
 export const getWordBankStats = (): Record<string, number> => {
     const stats: Record<string, number> = {};
     try {

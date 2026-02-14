@@ -1,3 +1,4 @@
+
 export type Direction = 'across' | 'down';
 
 export interface Clue {
@@ -68,7 +69,7 @@ export interface UserStats {
 }
 
 export interface GameState {
-  view: 'home' | 'categories' | 'profile' | 'game';
+  view: 'home' | 'categories' | 'profile' | 'game' | 'upload';
   status: 'idle' | 'generating' | 'playing' | 'completed';
   puzzle: PuzzleData | null;
   grid: CellData[][];

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { GameState, CellData, Direction, TopicId, Category, GameSettings, UserStats, Badge, Clue, Region, GenerationMode, Difficulty } from './types';
 import { generatePuzzle, getHintForCell, checkApiHealth } from './services/geminiService';
-import { getDailyPuzzleFromDb, saveDailyPuzzleToDb, saveGameState, loadGameState, clearGameState, getWordBankStats } from './services/storageService';
+import { getDailyPuzzleFromDb, saveDailyPuzzleToDb, saveGameState, loadGameState, clearGameState, getWordBankStats, addCustomWord } from './services/storageService';
 import { scrapeCategoryWords } from './services/webScraperService';
 import { PuzzleGrid } from './components/PuzzleGrid';
 import { VirtualKeyboard } from './components/VirtualKeyboard';
@@ -10,7 +10,7 @@ import {
   Share2, Play, Zap, Calendar, Globe, Eye, Type, AlertCircle,
   Home, Grid, User, Settings, Skull, Mic2, Star, Disc, Film, Gamepad2, Volume2, VolumeX, Medal,
   Laugh, Guitar, Sword, Smartphone, Check, Eye as EyeIcon, Type as TypeIcon, Hash, ArrowLeft, Brain, BookOpen, MapPin, Flag,
-  Download, Database, WifiOff, Wifi, Siren, AlertTriangle
+  Download, Database, WifiOff, Wifi, Siren, AlertTriangle, PlusCircle, Save
 } from 'lucide-react';
 
 // --- Configuration & Data ---
@@ -862,6 +862,133 @@ export default function App() {
       </nav>
   );
 
+  const UploadView = () => {
+    const [selectedTopic, setSelectedTopic] = useState<string>('');
+    const [word, setWord] = useState('');
+    const [clue, setClue] = useState('');
+    const [message, setMessage] = useState<{ text: string, type: 'success' | 'error' } | null>(null);
+
+    const handleSubmit = () => {
+        setMessage(null);
+        if (!selectedTopic) {
+            setMessage({ text: "Please select a category.", type: 'error' });
+            return;
+        }
+        
+        // Validation
+        const cleanWord = word.trim().toUpperCase().replace(/[^A-Z]/g, '');
+        if (cleanWord.length < 3 || cleanWord.length > 15) {
+             setMessage({ text: "Word must be 3-15 letters long (A-Z only).", type: 'error' });
+             return;
+        }
+        
+        const cleanClue = clue.trim();
+        if (cleanClue.length < 5 || cleanClue.split(' ').length > 15) {
+             setMessage({ text: "Clue must be descriptive but concise (max 15 words).", type: 'error' });
+             return;
+        }
+
+        try {
+            addCustomWord(selectedTopic, cleanWord, cleanClue);
+            setWordBankStats(getWordBankStats()); // Refresh global stats
+            setMessage({ text: `Successfully added "${cleanWord}" to ${selectedTopic}!`, type: 'success' });
+            setWord('');
+            setClue('');
+        } catch (e) {
+            setMessage({ text: "Failed to save word.", type: 'error' });
+        }
+    };
+
+    return (
+        <div className="flex flex-col gap-6 w-full max-w-2xl mx-auto pb-24 animate-[fade-in_0.5s_ease-out]">
+            <div className="flex items-center gap-3 mb-2">
+                 <button onClick={() => setGameState(p => ({...p, view: 'categories'}))} className="p-2 rounded-full hover:bg-white/10 transition-colors">
+                     <ArrowLeft size={24} className="text-white"/>
+                 </button>
+                 <h1 className="text-3xl font-black italic tracking-tighter text-white">CONTRIBUTE</h1>
+            </div>
+
+            <div className="glass-panel p-6 rounded-xl border border-slate-800">
+                <p className="text-sm text-slate-400 mb-6">
+                    Add your own knowledge to the game. Custom words are available in Offline mode and will appear in future puzzles for the selected category.
+                </p>
+
+                {/* Category Selection */}
+                <div className="mb-6">
+                    <label className="text-xs font-bold text-slate-500 uppercase tracking-widest block mb-3">1. Select Category</label>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-48 overflow-y-auto pr-2 custom-scrollbar">
+                        {CATEGORIES.map(cat => (
+                            <button
+                                key={cat.id}
+                                onClick={() => setSelectedTopic(cat.id)}
+                                className={`px-3 py-2 rounded-lg text-xs font-bold uppercase tracking-wide flex items-center gap-2 border transition-all
+                                ${selectedTopic === cat.id 
+                                    ? `bg-slate-800 text-white border-white ${cat.color.replace('text-', 'shadow-[0_0_10px_currentColor] text-')}` 
+                                    : 'bg-slate-900/50 text-slate-500 border-slate-800 hover:border-slate-600'}`}
+                            >
+                                <div className={`${selectedTopic === cat.id ? 'text-white' : cat.color} scale-75`}>{cat.icon}</div>
+                                {cat.label}
+                            </button>
+                        ))}
+                    </div>
+                </div>
+
+                {/* Constraints Info */}
+                <div className="flex gap-4 mb-6">
+                    <div className="flex-1 p-3 bg-slate-900/50 rounded-lg border border-white/5 text-center">
+                        <div className="text-[10px] font-bold text-slate-500 uppercase">Word Length</div>
+                        <div className="text-sm font-mono text-cyan-400">3 - 15 Letters</div>
+                    </div>
+                    <div className="flex-1 p-3 bg-slate-900/50 rounded-lg border border-white/5 text-center">
+                        <div className="text-[10px] font-bold text-slate-500 uppercase">Clue Length</div>
+                        <div className="text-sm font-mono text-fuchsia-400">Max 15 Words</div>
+                    </div>
+                </div>
+
+                {/* Inputs */}
+                <div className="flex flex-col gap-4 mb-6">
+                    <div>
+                        <label className="text-xs font-bold text-slate-500 uppercase tracking-widest block mb-2">2. Enter Word</label>
+                        <input 
+                            type="text" 
+                            value={word}
+                            onChange={(e) => setWord(e.target.value.toUpperCase())}
+                            placeholder="e.g. TERMINATOR"
+                            className="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-white font-mono placeholder:text-slate-700 focus:outline-none focus:border-fuchsia-500 focus:shadow-[0_0_15px_rgba(217,70,239,0.3)] transition-all"
+                        />
+                    </div>
+                    <div>
+                        <label className="text-xs font-bold text-slate-500 uppercase tracking-widest block mb-2">3. Enter Clue</label>
+                        <input 
+                            type="text" 
+                            value={clue}
+                            onChange={(e) => setClue(e.target.value)}
+                            placeholder="e.g. Cyborg assassin played by Arnold"
+                            className="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-white placeholder:text-slate-700 focus:outline-none focus:border-cyan-500 focus:shadow-[0_0_15px_rgba(6,182,212,0.3)] transition-all"
+                        />
+                    </div>
+                </div>
+
+                {/* Status Message */}
+                {message && (
+                    <div className={`p-3 rounded-lg mb-4 text-xs font-bold flex items-center gap-2 ${message.type === 'success' ? 'bg-emerald-900/20 text-emerald-400 border border-emerald-500/20' : 'bg-red-900/20 text-red-400 border border-red-500/20'}`}>
+                        {message.type === 'success' ? <Check size={14} /> : <AlertTriangle size={14} />}
+                        {message.text}
+                    </div>
+                )}
+
+                <button 
+                    onClick={handleSubmit}
+                    className="w-full py-4 bg-white text-black font-black uppercase tracking-widest rounded-xl hover:bg-fuchsia-50 hover:shadow-[0_0_20px_rgba(255,255,255,0.4)] transition-all flex justify-center items-center gap-2"
+                >
+                    <Save size={18} />
+                    Add to Library
+                </button>
+            </div>
+        </div>
+    );
+  };
+
   const HomeView = () => {
       const isDailyDone = stats.lastDailyDate === new Date().toISOString().split('T')[0];
       
@@ -1067,14 +1194,22 @@ export default function App() {
                     <Database size={18} className="text-emerald-400" />
                     <h2 className="text-sm font-bold uppercase tracking-widest text-slate-300">Offline Content Packs</h2>
                 </div>
-                <button 
-                    onClick={handleUpdateAll}
-                    disabled={!!isScraping || apiStatus === 'quota-exceeded'}
-                    className={`text-[10px] px-2 py-1 rounded border font-bold uppercase tracking-wider transition-all 
-                    ${!!isScraping ? 'text-slate-600 border-slate-800' : 'text-cyan-400 border-cyan-900/50 hover:bg-cyan-900/20 hover:text-cyan-300'}`}
-                >
-                    {isScraping ? 'Updating...' : 'Update All'}
-                </button>
+                <div className="flex gap-2">
+                     <button 
+                        onClick={() => setGameState(p => ({...p, view: 'upload'}))}
+                        className="text-[10px] px-2 py-1 rounded border font-bold uppercase tracking-wider transition-all text-fuchsia-400 border-fuchsia-900/50 hover:bg-fuchsia-900/20 hover:text-fuchsia-300 flex items-center gap-1"
+                    >
+                        <PlusCircle size={12} /> Contribute
+                    </button>
+                    <button 
+                        onClick={handleUpdateAll}
+                        disabled={!!isScraping || apiStatus === 'quota-exceeded'}
+                        className={`text-[10px] px-2 py-1 rounded border font-bold uppercase tracking-wider transition-all 
+                        ${!!isScraping ? 'text-slate-600 border-slate-800' : 'text-cyan-400 border-cyan-900/50 hover:bg-cyan-900/20 hover:text-cyan-300'}`}
+                    >
+                        {isScraping ? 'Updating...' : 'Update All'}
+                    </button>
+                </div>
              </div>
              <p className="text-xs text-slate-500 mb-4">Download word packs to play offline and reduce data usage. Scrapes authoritative web sources.</p>
              
@@ -1231,6 +1366,7 @@ export default function App() {
             {gameState.view === 'home' && <HomeView />}
             {gameState.view === 'categories' && <CategoriesView />}
             {gameState.view === 'profile' && <ProfileView />}
+            {gameState.view === 'upload' && <UploadView />}
 
             {gameState.view === 'game' && (
                 <div className="h-full flex flex-col animate-[fade-in_0.3s_ease-out]">
