@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { GameState, CellData, Direction, TopicId, Category, GameSettings, UserStats, Badge, Clue, Region, GenerationMode, Difficulty } from './types';
 import { generatePuzzle, getHintForCell, checkApiHealth } from './services/geminiService';
-import { getDailyPuzzleFromDb, saveDailyPuzzleToDb, saveGameState, loadGameState, clearGameState, getWordBankStats, addCustomWord } from './services/storageService';
+import { getDailyPuzzleFromDb, saveDailyPuzzleToDb, saveGameState, loadGameState, clearGameState, getWordBankStats, addCustomWord, getCustomHistory, HistoryItem, deleteCustomWord } from './services/storageService';
 import { scrapeCategoryWords } from './services/webScraperService';
 import { PuzzleGrid } from './components/PuzzleGrid';
 import { VirtualKeyboard } from './components/VirtualKeyboard';
@@ -10,7 +10,7 @@ import {
   Share2, Play, Zap, Calendar, Globe, Eye, Type, AlertCircle,
   Home, Grid, User, Settings, Skull, Mic2, Star, Disc, Film, Gamepad2, Volume2, VolumeX, Medal,
   Laugh, Guitar, Sword, Smartphone, Check, Eye as EyeIcon, Type as TypeIcon, Hash, ArrowLeft, Brain, BookOpen, MapPin, Flag,
-  Download, Database, WifiOff, Wifi, Siren, AlertTriangle, PlusCircle, Save
+  Download, Database, WifiOff, Wifi, Siren, AlertTriangle, PlusCircle, Save, Clock, Trash2
 } from 'lucide-react';
 
 // --- Configuration & Data ---
@@ -867,6 +867,11 @@ export default function App() {
     const [word, setWord] = useState('');
     const [clue, setClue] = useState('');
     const [message, setMessage] = useState<{ text: string, type: 'success' | 'error' } | null>(null);
+    const [history, setHistory] = useState<HistoryItem[]>([]);
+
+    useEffect(() => {
+        setHistory(getCustomHistory());
+    }, []);
 
     const handleSubmit = () => {
         setMessage(null);
@@ -891,11 +896,21 @@ export default function App() {
         try {
             addCustomWord(selectedTopic, cleanWord, cleanClue);
             setWordBankStats(getWordBankStats()); // Refresh global stats
+            setHistory(getCustomHistory()); // Refresh history list
             setMessage({ text: `Successfully added "${cleanWord}" to ${selectedTopic}!`, type: 'success' });
             setWord('');
             setClue('');
         } catch (e) {
             setMessage({ text: "Failed to save word.", type: 'error' });
+        }
+    };
+    
+    const handleDelete = (item: HistoryItem) => {
+        if(confirm(`Delete "${item.answer}" from library?`)) {
+            deleteCustomWord(item.topic, item.answer);
+            setWordBankStats(getWordBankStats()); // Refresh stats
+            setHistory(getCustomHistory()); // Refresh history
+            setMessage({ text: `Deleted "${item.answer}"`, type: 'success' });
         }
     };
 
@@ -985,6 +1000,33 @@ export default function App() {
                     Add to Library
                 </button>
             </div>
+            
+            {/* Recent History Section */}
+            {history.length > 0 && (
+                <div className="mt-2">
+                    <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3 flex items-center gap-2">
+                        <Clock size={14} /> Recent Contributions
+                    </h3>
+                    <div className="flex flex-col gap-2">
+                        {history.map((item, idx) => (
+                            <div key={idx} className="bg-slate-900/50 border border-white/5 p-3 rounded-lg flex justify-between items-center animate-[fade-in_0.3s_ease-out]">
+                                <div>
+                                    <div className="font-bold text-white text-sm font-mono">{item.answer}</div>
+                                    <div className="text-xs text-slate-400 italic">"{item.clue}"</div>
+                                </div>
+                                <div className="flex items-center gap-3">
+                                    <div className="text-[10px] uppercase font-bold text-slate-500 bg-slate-950 px-2 py-1 rounded border border-slate-800">
+                                        {CATEGORIES.find(c => c.id === item.topic)?.label || item.topic}
+                                    </div>
+                                    <button onClick={() => handleDelete(item)} className="text-slate-600 hover:text-red-400 transition-colors p-1" title="Delete Word">
+                                        <Trash2 size={14} />
+                                    </button>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
         </div>
     );
   };

@@ -2,6 +2,7 @@ import { PuzzleData, GameState } from '../types';
 
 const DAILY_KEY = 'popcross_db_daily';
 const WORD_BANK_PREFIX = 'popcross_words_';
+const HISTORY_KEY = 'popcross_custom_history';
 
 export interface DailyCache {
     date: string;
@@ -11,6 +12,13 @@ export interface DailyCache {
 export interface WordItem {
     answer: string;
     clue: string;
+}
+
+export interface HistoryItem {
+    topic: string;
+    answer: string;
+    clue: string;
+    timestamp: number;
 }
 
 // --- Word Bank Database ---
@@ -49,14 +57,68 @@ export const saveToWordBank = (topic: string, difficulty: string, newWords: Word
     }
 };
 
+export const getCustomHistory = (): HistoryItem[] => {
+    try {
+        const stored = localStorage.getItem(HISTORY_KEY);
+        return stored ? JSON.parse(stored) : [];
+    } catch (e) {
+        return [];
+    }
+};
+
 export const addCustomWord = (topic: string, word: string, clue: string) => {
     const item: WordItem = { answer: word.toUpperCase(), clue };
+    
     // We add the word to ALL difficulty buckets. 
     // The game engine filters by length at runtime, so it will appear in the correct difficulty automatically.
     const difficulties = ['Easy', 'Medium', 'Hard', 'Expert'];
     difficulties.forEach(diff => {
         saveToWordBank(topic, diff, [item]);
     });
+
+    // Save to History Log
+    try {
+        const history = getCustomHistory();
+        const newEntry: HistoryItem = { 
+            topic, 
+            answer: word.toUpperCase(), 
+            clue, 
+            timestamp: Date.now() 
+        };
+        // Prepend new entry, keep last 10
+        const updated = [newEntry, ...history].slice(0, 10);
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(updated));
+    } catch (e) {
+        console.error("History Save Error", e);
+    }
+};
+
+export const deleteCustomWord = (topic: string, answer: string) => {
+    const target = answer.toUpperCase();
+    const difficulties = ['Easy', 'Medium', 'Hard', 'Expert'];
+    
+    // Remove from Word Banks
+    difficulties.forEach(diff => {
+        const key = `${WORD_BANK_PREFIX}${topic}_${diff}`;
+        const stored = localStorage.getItem(key);
+        if (stored) {
+            const existing: WordItem[] = JSON.parse(stored);
+            const filtered = existing.filter(w => w.answer !== target);
+            // Only write if changed
+            if (filtered.length !== existing.length) {
+                localStorage.setItem(key, JSON.stringify(filtered));
+            }
+        }
+    });
+
+    // Remove from History
+    try {
+        const history = getCustomHistory();
+        const newHistory = history.filter(h => !(h.topic === topic && h.answer === target));
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(newHistory));
+    } catch (e) {
+        console.error("History delete error", e);
+    }
 };
 
 export const getWordBankStats = (): Record<string, number> => {
