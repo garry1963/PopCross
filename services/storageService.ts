@@ -3,6 +3,7 @@ import { PuzzleData, GameState } from '../types';
 const DAILY_KEY = 'popcross_db_daily';
 const WORD_BANK_PREFIX = 'popcross_words_';
 const HISTORY_KEY = 'popcross_custom_history';
+const CUSTOM_CATEGORIES_KEY = 'popcross_custom_categories';
 
 export interface DailyCache {
     date: string;
@@ -21,7 +22,63 @@ export interface HistoryItem {
     timestamp: number;
 }
 
+export interface SearchResult {
+    topic: string;
+    answer: string;
+    clue: string;
+}
+
+// --- Custom Categories ---
+
+export const getCustomCategories = (): any[] => {
+    try {
+        const stored = localStorage.getItem(CUSTOM_CATEGORIES_KEY);
+        return stored ? JSON.parse(stored) : [];
+    } catch (e) {
+        console.error("Custom Categories Read Error", e);
+        return [];
+    }
+};
+
+export const saveCustomCategory = (category: any) => {
+    try {
+        const current = getCustomCategories();
+        const index = current.findIndex((c: any) => c.id === category.id);
+        if (index >= 0) {
+            current[index] = category;
+        } else {
+            current.push(category);
+        }
+        localStorage.setItem(CUSTOM_CATEGORIES_KEY, JSON.stringify(current));
+    } catch (e) {
+        console.error("Custom Category Save Error", e);
+    }
+};
+
+export const deleteCustomCategory = (categoryId: string) => {
+    try {
+        const current = getCustomCategories();
+        const filtered = current.filter((c: any) => c.id !== categoryId);
+        localStorage.setItem(CUSTOM_CATEGORIES_KEY, JSON.stringify(filtered));
+        
+        // Also clean up word banks for this category
+        const difficulties = ['Easy', 'Medium', 'Hard', 'Expert'];
+        difficulties.forEach(diff => {
+            localStorage.removeItem(`${WORD_BANK_PREFIX}${categoryId}_${diff}`);
+        });
+    } catch (e) {
+        console.error("Custom Category Delete Error", e);
+    }
+};
+
 // --- Word Bank Database ---
+
+export const bulkAddWords = (topic: string, words: WordItem[]) => {
+    const difficulties = ['Easy', 'Medium', 'Hard', 'Expert'];
+    difficulties.forEach(diff => {
+        saveToWordBank(topic, diff, words);
+    });
+};
 
 export const getWordBank = (topic: string, difficulty: string): WordItem[] => {
     try {
@@ -64,6 +121,52 @@ export const getCustomHistory = (): HistoryItem[] => {
     } catch (e) {
         return [];
     }
+};
+
+export const searchWordBank = (query: string): SearchResult[] => {
+    if (!query || query.length < 2) return [];
+    const target = query.toUpperCase();
+    const results: SearchResult[] = [];
+    const seen = new Set<string>(); // avoid duplicates across difficulties
+
+    try {
+        for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (key && key.startsWith(WORD_BANK_PREFIX)) {
+                // Key format: popcross_words_Movies_Medium
+                const parts = key.replace(WORD_BANK_PREFIX, '').split('_');
+                const topic = parts[0];
+                // We ignore difficulty in the output, just returning unique topic/word combos
+                
+                const stored = localStorage.getItem(key);
+                if (stored) {
+                    const words: WordItem[] = JSON.parse(stored);
+                    words.forEach(w => {
+                        // Check if answer contains query
+                        if (w.answer.includes(target)) {
+                            const uniqueKey = `${topic}:${w.answer}`;
+                            if (!seen.has(uniqueKey)) {
+                                results.push({
+                                    topic,
+                                    answer: w.answer,
+                                    clue: w.clue
+                                });
+                                seen.add(uniqueKey);
+                            }
+                        }
+                    });
+                }
+            }
+        }
+    } catch (e) {
+        console.error("Search Error", e);
+    }
+    // Sort by exact match first, then alphabetical
+    return results.sort((a, b) => {
+        if (a.answer === target && b.answer !== target) return -1;
+        if (b.answer === target && a.answer !== target) return 1;
+        return a.answer.localeCompare(b.answer);
+    }).slice(0, 50); // Limit results
 };
 
 export const addCustomWord = (topic: string, word: string, clue: string) => {

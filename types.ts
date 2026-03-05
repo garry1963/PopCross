@@ -83,13 +83,7 @@ export interface GameState {
   settings: GameSettings;
 }
 
-export type TopicId = 
-  | 'General' | 'General Knowledge'
-  | 'Movies' | 'TV Shows' | 'Music' 
-  | '90s' | '2000s' | 'Modern' 
-  | 'Horror' | 'Sci-Fi' | 'Comedy' 
-  | 'Crime' | 'Rock' | 'Pop Divas' 
-  | 'Superheroes' | 'Reality TV' | 'Anime';
+export type TopicId = string;
 
 export interface Category {
     id: TopicId;
@@ -97,4 +91,5 @@ export interface Category {
     icon: any; // Lucide icon component
     color: string;
     description: string;
+    isCustom?: boolean;
 }

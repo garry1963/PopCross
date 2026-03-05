@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { GameState, CellData, Direction, TopicId, Category, GameSettings, UserStats, Badge, Clue, Region, GenerationMode, Difficulty } from './types';
 import { generatePuzzle, getHintForCell, checkApiHealth } from './services/geminiService';
-import { getDailyPuzzleFromDb, saveDailyPuzzleToDb, saveGameState, loadGameState, clearGameState, getWordBankStats, addCustomWord, getCustomHistory, HistoryItem, deleteCustomWord } from './services/storageService';
+import { getDailyPuzzleFromDb, saveDailyPuzzleToDb, saveGameState, loadGameState, clearGameState, getWordBankStats, addCustomWord, getCustomHistory, HistoryItem, deleteCustomWord, searchWordBank, SearchResult, getCustomCategories, saveCustomCategory, deleteCustomCategory, bulkAddWords } from './services/storageService';
 import { scrapeCategoryWords } from './services/webScraperService';
+import { initAuth, syncUserStats, loadUserStats, uploadContributedWord } from './services/firebaseService'; // Import Firebase Services
 import { PuzzleGrid } from './components/PuzzleGrid';
 import { VirtualKeyboard } from './components/VirtualKeyboard';
 import { 
@@ -10,12 +11,12 @@ import {
   Share2, Play, Zap, Calendar, Globe, Eye, Type, AlertCircle,
   Home, Grid, User, Settings, Skull, Mic2, Star, Disc, Film, Gamepad2, Volume2, VolumeX, Medal,
   Laugh, Guitar, Sword, Smartphone, Check, Eye as EyeIcon, Type as TypeIcon, Hash, ArrowLeft, Brain, BookOpen, MapPin, Flag,
-  Download, Database, WifiOff, Wifi, Siren, AlertTriangle, PlusCircle, Save, Clock, Trash2
+  Download, Database, WifiOff, Wifi, Siren, AlertTriangle, PlusCircle, Save, Clock, Trash2, Search, Cloud, Edit, Upload, X
 } from 'lucide-react';
 
 // --- Configuration & Data ---
 
-const CATEGORIES: Category[] = [
+const DEFAULT_CATEGORIES: Category[] = [
   { id: 'General', label: 'General', icon: <Brain size={20}/>, color: 'text-teal-400', description: 'Trivia & Variety' },
   { id: 'General Knowledge', label: 'Gen Knowledge', icon: <BookOpen size={20}/>, color: 'text-lime-400', description: 'History, Science & Geo' },
   { id: 'Movies', label: 'Movies', icon: <Clapperboard size={20}/>, color: 'text-pink-400', description: 'Blockbusters & Classics' },
@@ -103,24 +104,66 @@ export default function App() {
   const [isScraping, setIsScraping] = useState<string | null>(null);
   const [scrapeProgress, setScrapeProgress] = useState("");
   
-  // --- Persistence ---
+  // Firebase Auth State
+  const [user, setUser] = useState<any | null>(null);
+
+  // Category Management State
+  const [categories, setCategories] = useState<Category[]>(DEFAULT_CATEGORIES);
+  const [showCategoryManager, setShowCategoryManager] = useState(false);
+  const [newCategoryName, setNewCategoryName] = useState("");
+  const [bulkUploadText, setBulkUploadText] = useState("");
+  const [selectedCategoryForUpload, setSelectedCategoryForUpload] = useState<string>("");
+
+  // --- Persistence & Auth ---
   useEffect(() => {
+    // Load Custom Categories
+    const customCats = getCustomCategories();
+    // Merge with defaults, ensuring no duplicates if IDs clash (though they shouldn't)
+    const merged = [...DEFAULT_CATEGORIES];
+    customCats.forEach((c: any) => {
+        if (!merged.find(m => m.id === c.id)) {
+            // Rehydrate icon? We can't easily store React components in JSON.
+            // We'll use a default icon for custom categories for now.
+            merged.push({ ...c, icon: <Hash size={20}/>, isCustom: true });
+        }
+    });
+    setCategories(merged);
+
+    // 1. Initialize Firebase Auth
+    const unsubscribe = initAuth((firebaseUser) => {
+        setUser(firebaseUser);
+        if (firebaseUser) {
+            // Optional: Load remote stats?
+            // For now, we prioritize local stats to prevent overwriting progress with empty remote data,
+            // but in a production app you'd want a merge strategy.
+            // loadUserStats(firebaseUser).then(remoteStats => { if(remoteStats) setStats(remoteStats); });
+        }
+    });
+
+    // 2. Load Local Data
     const savedStats = localStorage.getItem('popcross_stats_v2');
     if (savedStats) setStats(JSON.parse(savedStats));
 
     const savedGame = loadGameState();
     if (savedGame) setSavedGameExists(true);
 
-    // Initial API Health Check
+    // 3. Initial API Health Check
     checkApiHealth().then(isOk => setApiStatus(isOk ? 'ok' : 'error'));
     
-    // Load Word Bank Stats
+    // 4. Load Word Bank Stats
     setWordBankStats(getWordBankStats());
+
+    return () => unsubscribe();
   }, []);
 
   useEffect(() => {
     localStorage.setItem('popcross_stats_v2', JSON.stringify(stats));
-  }, [stats]);
+    
+    // Sync to Firebase if user is logged in
+    if (user) {
+        syncUserStats(user, stats);
+    }
+  }, [stats, user]);
 
   // Clean up save file when game is completed
   useEffect(() => {
@@ -359,7 +402,7 @@ export default function App() {
 
       if (isDaily) {
           // Select Random Category
-          const randomCat = CATEGORIES[Math.floor(Math.random() * CATEGORIES.length)];
+          const randomCat = categories[Math.floor(Math.random() * categories.length)];
           targetTopic = randomCat.id;
 
           // Select Random Difficulty
@@ -757,6 +800,81 @@ export default function App() {
       }
   };
 
+  const handleAddCategory = () => {
+      if (!newCategoryName.trim()) return;
+      
+      const id = newCategoryName.trim();
+      // Check if exists
+      if (categories.find(c => c.id === id)) {
+          alert("Category already exists!");
+          return;
+      }
+
+      const newCat: Category = {
+          id: id,
+          label: id,
+          icon: <Hash size={20}/>, // Default icon
+          color: 'text-white', // Default color
+          description: 'Custom Category',
+          isCustom: true
+      };
+
+      // Save to storage (strip React element for JSON)
+      const storageCat = { ...newCat, icon: 'Hash' }; 
+      saveCustomCategory(storageCat);
+
+      setCategories(prev => [...prev, newCat]);
+      setNewCategoryName("");
+  };
+
+  const handleDeleteCategory = (id: string) => {
+      if (!confirm(`Delete category "${id}" and all its words?`)) return;
+      
+      deleteCustomCategory(id);
+      setCategories(prev => prev.filter(c => c.id !== id));
+  };
+
+  const handleBulkUpload = () => {
+      if (!selectedCategoryForUpload || !bulkUploadText.trim()) return;
+
+      try {
+          // Parse text: "WORD: Clue" or JSON
+          let words: {answer: string, clue: string}[] = [];
+          
+          if (bulkUploadText.trim().startsWith('[')) {
+              // Try JSON
+              words = JSON.parse(bulkUploadText);
+          } else {
+              // Try Line-based
+              const lines = bulkUploadText.split('\n');
+              lines.forEach(line => {
+                  const parts = line.split(':');
+                  if (parts.length >= 2) {
+                      const answer = parts[0].trim().toUpperCase();
+                      const clue = parts.slice(1).join(':').trim();
+                      if (answer && clue) {
+                          words.push({ answer, clue });
+                      }
+                  }
+              });
+          }
+
+          if (words.length === 0) {
+              alert("No valid words found. Use format 'WORD: Clue' per line.");
+              return;
+          }
+
+          bulkAddWords(selectedCategoryForUpload, words);
+          alert(`Successfully added ${words.length} words to ${selectedCategoryForUpload}!`);
+          setBulkUploadText("");
+          // Refresh stats
+          setWordBankStats(getWordBankStats());
+      } catch (e) {
+          alert("Error parsing input. Please check format.");
+          console.error(e);
+      }
+  };
+
   // Scraper Action
   const handleScrape = async (categoryId: string) => {
       if (isScraping) return;
@@ -802,7 +920,7 @@ export default function App() {
        const stats = getWordBankStats();
        // Only auto-update topics that have fewer than 200 words cached, 
        // since we now fetch 300+ in a single batch.
-       const catsToUpdate = CATEGORIES.filter(c => (stats[c.id] || 0) < 200);
+       const catsToUpdate = categories.filter(c => (stats[c.id] || 0) < 200);
 
        if (catsToUpdate.length === 0) {
            alert("All packs are fully stocked!");
@@ -868,10 +986,23 @@ export default function App() {
     const [clue, setClue] = useState('');
     const [message, setMessage] = useState<{ text: string, type: 'success' | 'error' } | null>(null);
     const [history, setHistory] = useState<HistoryItem[]>([]);
+    
+    // New Search State
+    const [searchQuery, setSearchQuery] = useState('');
+    const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
 
     useEffect(() => {
         setHistory(getCustomHistory());
     }, []);
+
+    // Search Effect
+    useEffect(() => {
+        if (searchQuery.length >= 2) {
+            setSearchResults(searchWordBank(searchQuery));
+        } else {
+            setSearchResults([]);
+        }
+    }, [searchQuery]);
 
     const handleSubmit = () => {
         setMessage(null);
@@ -894,7 +1025,12 @@ export default function App() {
         }
 
         try {
+            // Local Save
             addCustomWord(selectedTopic, cleanWord, cleanClue);
+            
+            // Cloud Upload (Fire and Forget)
+            uploadContributedWord(user, selectedTopic, cleanWord, cleanClue);
+
             setWordBankStats(getWordBankStats()); // Refresh global stats
             setHistory(getCustomHistory()); // Refresh history list
             setMessage({ text: `Successfully added "${cleanWord}" to ${selectedTopic}!`, type: 'success' });
@@ -905,14 +1041,27 @@ export default function App() {
         }
     };
     
-    const handleDelete = (item: HistoryItem) => {
+    const handleDeleteHistory = (item: HistoryItem) => {
         if(confirm(`Delete "${item.answer}" from library?`)) {
             deleteCustomWord(item.topic, item.answer);
             setWordBankStats(getWordBankStats()); // Refresh stats
             setHistory(getCustomHistory()); // Refresh history
             setMessage({ text: `Deleted "${item.answer}"`, type: 'success' });
+            
+            // Also update search results if it was visible there
+            setSearchResults(prev => prev.filter(r => !(r.topic === item.topic && r.answer === item.answer)));
         }
     };
+
+    const handleDeleteSearch = (item: SearchResult) => {
+         if(confirm(`Delete "${item.answer}" from library?`)) {
+            deleteCustomWord(item.topic, item.answer);
+            setWordBankStats(getWordBankStats()); // Refresh stats
+            setHistory(getCustomHistory()); // Refresh history
+            setSearchResults(prev => prev.filter(r => !(r.topic === item.topic && r.answer === item.answer)));
+            setMessage({ text: `Deleted "${item.answer}"`, type: 'success' });
+        }
+    }
 
     return (
         <div className="flex flex-col gap-6 w-full max-w-2xl mx-auto pb-24 animate-[fade-in_0.5s_ease-out]">
@@ -932,7 +1081,7 @@ export default function App() {
                 <div className="mb-6">
                     <label className="text-xs font-bold text-slate-500 uppercase tracking-widest block mb-3">1. Select Category</label>
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-48 overflow-y-auto pr-2 custom-scrollbar">
-                        {CATEGORIES.map(cat => (
+                        {categories.map(cat => (
                             <button
                                 key={cat.id}
                                 onClick={() => setSelectedTopic(cat.id)}
@@ -1001,9 +1150,51 @@ export default function App() {
                 </button>
             </div>
             
+            {/* Search Library Section */}
+            <div className="mt-8">
+                <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3 flex items-center gap-2">
+                    <Search size={14} /> Search Library
+                </h3>
+                <div className="relative mb-4">
+                    <input 
+                        type="text"
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        placeholder="Find word to delete (e.g. DERRYGIRLS)"
+                        className="w-full bg-slate-900/50 border border-slate-700 rounded-lg p-3 pl-10 text-white placeholder:text-slate-600 focus:outline-none focus:border-slate-500 transition-all"
+                    />
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" size={18} />
+                </div>
+                
+                {searchQuery.length >= 2 && (
+                    <div className="flex flex-col gap-2 mb-8">
+                        {searchResults.length === 0 ? (
+                            <div className="text-slate-600 text-xs italic text-center py-4">No words found in library.</div>
+                        ) : (
+                            searchResults.map((item, idx) => (
+                                <div key={idx} className="bg-slate-900/50 border border-white/5 p-3 rounded-lg flex justify-between items-center animate-[fade-in_0.3s_ease-out]">
+                                    <div>
+                                        <div className="font-bold text-white text-sm font-mono">{item.answer}</div>
+                                        <div className="text-xs text-slate-400 italic">"{item.clue}"</div>
+                                    </div>
+                                    <div className="flex items-center gap-3">
+                                        <div className="text-[10px] uppercase font-bold text-slate-500 bg-slate-950 px-2 py-1 rounded border border-slate-800">
+                                            {categories.find(c => c.id === item.topic)?.label || item.topic}
+                                        </div>
+                                        <button onClick={() => handleDeleteSearch(item)} className="bg-red-900/20 text-red-400 hover:bg-red-900/50 hover:text-white transition-colors p-2 rounded-lg" title="Delete Word">
+                                            <Trash2 size={16} />
+                                        </button>
+                                    </div>
+                                </div>
+                            ))
+                        )}
+                    </div>
+                )}
+            </div>
+
             {/* Recent History Section */}
             {history.length > 0 && (
-                <div className="mt-2">
+                <div className="mt-4">
                     <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3 flex items-center gap-2">
                         <Clock size={14} /> Recent Contributions
                     </h3>
@@ -1016,9 +1207,9 @@ export default function App() {
                                 </div>
                                 <div className="flex items-center gap-3">
                                     <div className="text-[10px] uppercase font-bold text-slate-500 bg-slate-950 px-2 py-1 rounded border border-slate-800">
-                                        {CATEGORIES.find(c => c.id === item.topic)?.label || item.topic}
+                                        {categories.find(c => c.id === item.topic)?.label || item.topic}
                                     </div>
-                                    <button onClick={() => handleDelete(item)} className="text-slate-600 hover:text-red-400 transition-colors p-1" title="Delete Word">
+                                    <button onClick={() => handleDeleteHistory(item)} className="text-slate-600 hover:text-red-400 transition-colors p-1" title="Delete Word">
                                         <Trash2 size={14} />
                                     </button>
                                 </div>
@@ -1048,7 +1239,7 @@ export default function App() {
                    return (
                        <div className="bg-cyan-950/50 border-cyan-500/30 text-cyan-400 px-3 py-1 rounded-full border flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest">
                            <div className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse"></div>
-                           Deep Scanning {CATEGORIES.find(c=>c.id===isScraping)?.label}...
+                           Deep Scanning {categories.find(c=>c.id===isScraping)?.label}...
                        </div>
                    );
               }
@@ -1107,6 +1298,17 @@ export default function App() {
                 </h1>
                 <p className="text-slate-400 text-xs font-bold uppercase tracking-[0.3em] mt-3 text-glow opacity-80">Infinite Culture Puzzles</p>
              </div>
+            
+             {/* User Status (Firebase) */}
+             <div className="flex justify-center -mt-2">
+                 {user ? (
+                     <div className="text-[10px] text-emerald-400 flex items-center gap-1">
+                         <Cloud size={10} /> Cloud Sync Active
+                     </div>
+                 ) : (
+                     <div className="text-[10px] text-slate-500">Local Save Only</div>
+                 )}
+             </div>
 
              {/* Daily Card */}
              <div className="glass-panel p-6 rounded-2xl relative overflow-hidden group">
@@ -1163,7 +1365,108 @@ export default function App() {
 
   const CategoriesView = () => (
       <div className="flex flex-col gap-6 w-full max-w-2xl mx-auto pb-24 animate-[fade-in_0.5s_ease-out]">
-          <h1 className="text-3xl font-black italic tracking-tighter text-white mb-2">CHANNELS</h1>
+          <div className="flex items-center justify-between mb-2">
+              <h1 className="text-3xl font-black italic tracking-tighter text-white">CHANNELS</h1>
+              <button 
+                  onClick={() => setShowCategoryManager(true)}
+                  className="px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs font-bold uppercase tracking-wider text-slate-300 hover:bg-slate-700 hover:text-white transition-all flex items-center gap-2"
+              >
+                  <Edit size={14} /> Manage
+              </button>
+          </div>
+          
+          {/* Category Manager Modal */}
+          {showCategoryManager && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-[fade-in_0.2s_ease-out]">
+                  <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-md max-h-[90vh] overflow-y-auto shadow-2xl flex flex-col">
+                      <div className="p-4 border-b border-slate-800 flex items-center justify-between sticky top-0 bg-slate-900 z-10">
+                          <h2 className="text-lg font-bold text-white uppercase tracking-widest">Manage Categories</h2>
+                          <button onClick={() => setShowCategoryManager(false)} className="p-2 hover:bg-slate-800 rounded-full text-slate-400 hover:text-white">
+                              <X size={20} />
+                          </button>
+                      </div>
+                      
+                      <div className="p-6 flex flex-col gap-8">
+                          {/* Add New Category */}
+                          <div>
+                              <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Add Custom Category</h3>
+                              <div className="flex gap-2">
+                                  <input 
+                                      type="text" 
+                                      value={newCategoryName}
+                                      onChange={(e) => setNewCategoryName(e.target.value)}
+                                      placeholder="Category Name (e.g. Biology)"
+                                      className="flex-1 bg-slate-950 border border-slate-700 rounded-lg p-3 text-white text-sm placeholder:text-slate-700 focus:outline-none focus:border-fuchsia-500 transition-all"
+                                  />
+                                  <button 
+                                      onClick={handleAddCategory}
+                                      disabled={!newCategoryName.trim()}
+                                      className="px-4 bg-fuchsia-600 text-white rounded-lg font-bold uppercase tracking-wider hover:bg-fuchsia-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                                  >
+                                      Add
+                                  </button>
+                              </div>
+                          </div>
+
+                          {/* Bulk Upload */}
+                          <div>
+                              <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Bulk Upload Words</h3>
+                              <div className="flex flex-col gap-3">
+                                  <select 
+                                      value={selectedCategoryForUpload}
+                                      onChange={(e) => setSelectedCategoryForUpload(e.target.value)}
+                                      className="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-white text-sm focus:outline-none focus:border-cyan-500 transition-all"
+                                  >
+                                      <option value="">Select Target Category...</option>
+                                      {categories.map(c => (
+                                          <option key={c.id} value={c.id}>{c.label}</option>
+                                      ))}
+                                  </select>
+                                  
+                                  <textarea 
+                                      value={bulkUploadText}
+                                      onChange={(e) => setBulkUploadText(e.target.value)}
+                                      placeholder={`Format:\nWORD: Clue text\nANOTHER: Another clue`}
+                                      className="w-full h-32 bg-slate-950 border border-slate-700 rounded-lg p-3 text-white font-mono text-xs placeholder:text-slate-700 focus:outline-none focus:border-cyan-500 transition-all resize-none"
+                                  />
+                                  
+                                  <button 
+                                      onClick={handleBulkUpload}
+                                      disabled={!selectedCategoryForUpload || !bulkUploadText.trim()}
+                                      className="w-full py-3 bg-cyan-900/50 text-cyan-400 border border-cyan-500/30 rounded-lg font-bold uppercase tracking-wider hover:bg-cyan-900 hover:text-white hover:border-cyan-500 transition-all flex justify-center items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                                  >
+                                      <Upload size={16} /> Upload Words
+                                  </button>
+                              </div>
+                          </div>
+
+                          {/* Existing Categories List */}
+                          <div>
+                              <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Your Categories</h3>
+                              <div className="flex flex-col gap-2 max-h-48 overflow-y-auto pr-2 custom-scrollbar">
+                                  {categories.filter(c => c.isCustom).length === 0 && (
+                                      <div className="text-slate-600 text-xs italic text-center py-4">No custom categories yet.</div>
+                                  )}
+                                  {categories.filter(c => c.isCustom).map(cat => (
+                                      <div key={cat.id} className="flex items-center justify-between p-3 bg-slate-950 rounded-lg border border-slate-800">
+                                          <div className="flex items-center gap-3">
+                                              <div className="text-slate-500"><Hash size={16}/></div>
+                                              <span className="text-sm font-bold text-white">{cat.label}</span>
+                                          </div>
+                                          <button 
+                                              onClick={() => handleDeleteCategory(cat.id)}
+                                              className="text-slate-600 hover:text-red-400 p-2 rounded hover:bg-red-900/20 transition-colors"
+                                          >
+                                              <Trash2 size={16} />
+                                          </button>
+                                      </div>
+                                  ))}
+                              </div>
+                          </div>
+                      </div>
+                  </div>
+              </div>
+          )}
           
           {/* Settings Group */}
           <div className="flex flex-col gap-3 glass-panel p-4 rounded-xl border border-slate-800">
@@ -1256,7 +1559,7 @@ export default function App() {
              <p className="text-xs text-slate-500 mb-4">Download word packs to play offline and reduce data usage. Scrapes authoritative web sources.</p>
              
              <div className="grid grid-cols-1 gap-2 max-h-48 overflow-y-auto pr-2 custom-scrollbar">
-                {CATEGORIES.map(cat => {
+                {categories.map(cat => {
                     const count = wordBankStats[cat.id] || 0;
                     const isDownloading = isScraping === cat.id;
                     return (
@@ -1291,7 +1594,7 @@ export default function App() {
           </div>
           
           <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-              {CATEGORIES.map(cat => (
+              {categories.map(cat => (
                   <button 
                     key={cat.id}
                     onClick={() => startNewGame(cat.id)}
@@ -1309,93 +1612,109 @@ export default function App() {
       </div>
   );
 
-  const ProfileView = () => (
+  const ProfileView = () => {
+    const progressPercent = Math.min(100, Math.round((stats.xp / stats.xpToNextLevel) * 100));
+
+    return (
       <div className="flex flex-col gap-6 w-full max-w-2xl mx-auto pb-24 animate-[fade-in_0.5s_ease-out]">
-          <h1 className="text-3xl font-black italic tracking-tighter text-white mb-2">YOUR PROFILE</h1>
-          
-          {/* Main Stats Card */}
-          <div className="glass-panel p-6 rounded-xl flex flex-col gap-4 relative overflow-hidden">
-             <div className="absolute top-0 right-0 p-4 opacity-10">
-                 <Trophy size={120} className="text-yellow-400" />
+        <h1 className="text-3xl font-black italic tracking-tighter text-white mb-2">PLAYER STATS</h1>
+        
+        {/* Level Card */}
+        <div className="glass-panel p-6 rounded-xl relative overflow-hidden border border-slate-800">
+             <div className="absolute top-0 right-0 p-4 opacity-10 pointer-events-none">
+                 <Trophy size={120} />
              </div>
-             
-             <div className="flex items-center gap-4 relative z-10">
-                 <div className="w-16 h-16 rounded-full bg-gradient-to-br from-fuchsia-500 to-purple-600 flex items-center justify-center text-2xl font-bold text-white shadow-lg ring-4 ring-white/10">
-                     {stats.level}
-                 </div>
-                 <div>
-                     <div className="text-xs font-bold text-slate-400 uppercase tracking-widest">Level</div>
-                     <div className="text-2xl font-black text-white">Puzzle Master</div>
-                 </div>
-             </div>
-             
-             {/* XP Bar */}
              <div className="relative z-10">
-                 <div className="flex justify-between text-[10px] font-bold uppercase text-slate-400 mb-1">
-                     <span>XP Progress</span>
-                     <span>{Math.floor(stats.xp)} / {stats.xpToNextLevel}</span>
+                 <div className="flex justify-between items-end mb-2">
+                     <div>
+                         <span className="text-xs font-bold text-fuchsia-400 uppercase tracking-widest">Current Level</span>
+                         <div className="text-5xl font-black text-white leading-none">LVL {stats.level}</div>
+                     </div>
+                     <div className="text-right">
+                         <div className="text-xs font-bold text-slate-500 uppercase tracking-widest">Total Score</div>
+                         <div className="text-2xl font-mono text-white">{stats.totalPoints.toLocaleString()}</div>
+                     </div>
                  </div>
-                 <div className="h-3 bg-slate-900 rounded-full overflow-hidden border border-white/5">
+                 
+                 {/* XP Bar */}
+                 <div className="w-full h-4 bg-slate-900 rounded-full overflow-hidden border border-white/5 relative">
                      <div 
-                        className="h-full bg-gradient-to-r from-fuchsia-500 to-purple-500 transition-all duration-500"
-                        style={{ width: `${Math.min(100, (stats.xp / stats.xpToNextLevel) * 100)}%` }}
+                        className="h-full bg-gradient-to-r from-fuchsia-600 to-purple-600 transition-all duration-1000 ease-out"
+                        style={{ width: `${progressPercent}%` }}
                      ></div>
                  </div>
-             </div>
-
-             <div className="grid grid-cols-2 gap-4 mt-2 relative z-10">
-                 <div className="p-3 bg-slate-900/50 rounded-lg border border-white/5">
-                     <div className="text-[10px] font-bold text-slate-500 uppercase">Total Score</div>
-                     <div className="text-xl font-mono text-white">{stats.totalPoints.toLocaleString()}</div>
-                 </div>
-                 <div className="p-3 bg-slate-900/50 rounded-lg border border-white/5">
-                     <div className="text-[10px] font-bold text-slate-500 uppercase">Games Won</div>
-                     <div className="text-xl font-mono text-white">{stats.gamesWon} <span className="text-slate-500 text-xs">/ {stats.gamesPlayed}</span></div>
+                 <div className="flex justify-between mt-1">
+                     <span className="text-[10px] font-mono text-slate-500">{stats.xp} XP</span>
+                     <span className="text-[10px] font-mono text-slate-500">NEXT: {stats.xpToNextLevel} XP</span>
                  </div>
              </div>
-          </div>
+        </div>
 
-          {/* Badges Section */}
-          <div>
-              <h3 className="text-sm font-bold text-slate-500 uppercase tracking-widest mb-3">Achievements</h3>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                  {stats.badges.map(badge => (
-                      <div 
-                        key={badge.id} 
-                        className={`p-3 rounded-xl border flex flex-col items-center text-center gap-2 transition-all
+        {/* Stats Grid */}
+        <div className="grid grid-cols-2 gap-3">
+             <div className="bg-slate-900/50 p-4 rounded-xl border border-white/5 flex flex-col items-center justify-center text-center">
+                 <div className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-1">Games Won</div>
+                 <div className="text-3xl font-black text-emerald-400">{stats.gamesWon} <span className="text-sm text-slate-600">/ {stats.gamesPlayed}</span></div>
+             </div>
+             <div className="bg-slate-900/50 p-4 rounded-xl border border-white/5 flex flex-col items-center justify-center text-center">
+                 <div className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-1">Win Rate</div>
+                 <div className="text-3xl font-black text-cyan-400">
+                     {stats.gamesPlayed > 0 ? Math.round((stats.gamesWon / stats.gamesPlayed) * 100) : 0}%
+                 </div>
+             </div>
+             <div className="bg-slate-900/50 p-4 rounded-xl border border-white/5 flex flex-col items-center justify-center text-center">
+                 <div className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-1">Current Streak</div>
+                 <div className="text-3xl font-black text-yellow-400 flex items-center gap-1">
+                     <Zap size={24} className="fill-yellow-400"/> {stats.currentStreak}
+                 </div>
+             </div>
+             <div className="bg-slate-900/50 p-4 rounded-xl border border-white/5 flex flex-col items-center justify-center text-center">
+                 <div className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-1">Best Streak</div>
+                 <div className="text-3xl font-black text-orange-400">{stats.maxStreak}</div>
+             </div>
+        </div>
+
+        {/* Badges */}
+        <div>
+            <h3 className="text-sm font-bold text-slate-500 uppercase tracking-widest mb-3">Achievements</h3>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {stats.badges.map(badge => (
+                    <div 
+                        key={badge.id}
+                        className={`p-3 rounded-xl border flex items-center gap-4 transition-all
                         ${badge.unlocked 
-                            ? 'bg-gradient-to-br from-slate-800 to-slate-900 border-yellow-500/30 shadow-[0_0_15px_rgba(234,179,8,0.1)]' 
-                            : 'bg-slate-900/50 border-slate-800 opacity-50 grayscale'
-                        }`}
-                      >
-                          <div className="text-2xl">{badge.icon}</div>
-                          <div>
-                              <div className={`text-xs font-bold ${badge.unlocked ? 'text-white' : 'text-slate-500'}`}>{badge.name}</div>
-                              <div className="text-[9px] text-slate-500 leading-tight mt-1">{badge.description}</div>
-                          </div>
-                      </div>
-                  ))}
-              </div>
-          </div>
-
-          {/* Streak Section */}
-           <div className="glass-panel p-4 rounded-xl flex items-center justify-between border border-orange-500/20 bg-orange-900/10">
-              <div className="flex items-center gap-3">
-                  <div className="p-2 bg-orange-500/20 rounded-lg text-orange-400">
-                      <Zap size={24} />
-                  </div>
-                  <div>
-                      <div className="text-xs font-bold text-orange-200 uppercase tracking-widest">Current Streak</div>
-                      <div className="text-2xl font-black text-white">{stats.currentStreak} Days</div>
-                  </div>
-              </div>
-              <div className="text-right">
-                  <div className="text-[10px] font-bold text-orange-200/50 uppercase">Best</div>
-                  <div className="text-lg font-mono text-orange-200">{stats.maxStreak}</div>
-              </div>
-          </div>
+                            ? 'bg-slate-800/80 border-fuchsia-500/30 shadow-[0_0_15px_rgba(217,70,239,0.1)]' 
+                            : 'bg-slate-900/50 border-slate-800 opacity-60 grayscale'}`}
+                    >
+                        <div className="text-3xl">{badge.icon}</div>
+                        <div>
+                            <div className={`font-bold text-sm ${badge.unlocked ? 'text-white' : 'text-slate-500'}`}>{badge.name}</div>
+                            <div className="text-xs text-slate-500 leading-tight">{badge.description}</div>
+                        </div>
+                        {badge.unlocked && <div className="ml-auto text-fuchsia-400"><Check size={16}/></div>}
+                    </div>
+                ))}
+            </div>
+        </div>
+        
+        {/* Reset Data (Debug/Dev) */}
+        <div className="pt-8 flex justify-center">
+             <button 
+                onClick={() => {
+                    if(confirm("Are you sure you want to reset all progress? This cannot be undone.")) {
+                        setStats(INITIAL_STATS);
+                        clearGameState();
+                        window.location.reload();
+                    }
+                }}
+                className="text-xs font-bold text-red-900/50 hover:text-red-500 uppercase tracking-widest px-4 py-2"
+             >
+                 Reset Save Data
+             </button>
+        </div>
       </div>
-  );
+    );
+  };
 
   // --- Main Render ---
 
