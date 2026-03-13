@@ -2,7 +2,7 @@ import { GoogleGenAI, Schema, Type } from "@google/genai";
 import { saveToWordBank, WordItem } from "./storageService";
 import { Difficulty } from "../types";
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 // We use the flash model. It has a massive context window and is 
 // cheap/fast enough to generate hundreds of structured items in one go.
@@ -42,7 +42,8 @@ export const scrapeCategoryWords = async (
         
         Constraints:
         - Output strictly valid JSON.
-        - Answers must be uppercase, alphanumeric only (remove spaces/punctuation).
+        - Answers must be uppercase, letters only (A-Z, no numbers, remove spaces/punctuation).
+        - Answers must be at least 3 letters long.
         - Clues must be punchy and direct (max 6 words).
         - NO DUPLICATES within the list.
         

@@ -2,7 +2,7 @@ import { GoogleGenAI, Type, Schema } from "@google/genai";
 import { PuzzleData, Clue, Difficulty, Region } from "../types";
 import { getWordBank, saveToWordBank, WordItem } from "./storageService";
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 // Configuration
 // gemini-3-flash-preview is optimized for speed and instruction following
@@ -150,7 +150,7 @@ const fetchWordList = async (topic: string, difficulty: Difficulty, region: Regi
       2. Answers must be single words (no spaces) or common phrases with spaces removed.
       3. Uppercase only.
       4. Length: Minimum 3 letters, Maximum ${config.gridSize} letters.
-      5. No special characters.
+      5. No special characters or numbers. Letters A-Z only.
       6. DENSITY FOCUS: Provide a mix of lengths, but prioritize 3-7 letter words. Short words are essential for creating a dense grid with many words.
       
       Output JSON format:

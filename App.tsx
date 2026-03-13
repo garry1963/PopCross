@@ -839,11 +839,11 @@ export default function App() {
 
       try {
           // Parse text: "WORD: Clue" or JSON
-          let words: {answer: string, clue: string}[] = [];
+          let rawWords: {answer: string, clue: string}[] = [];
           
           if (bulkUploadText.trim().startsWith('[')) {
               // Try JSON
-              words = JSON.parse(bulkUploadText);
+              rawWords = JSON.parse(bulkUploadText);
           } else {
               // Try Line-based
               const lines = bulkUploadText.split('\n');
@@ -853,14 +853,23 @@ export default function App() {
                       const answer = parts[0].trim().toUpperCase();
                       const clue = parts.slice(1).join(':').trim();
                       if (answer && clue) {
-                          words.push({ answer, clue });
+                          rawWords.push({ answer, clue });
                       }
                   }
               });
           }
 
+          // Sanitize and filter: min 3 letters, no numbers
+          const words = rawWords
+              .filter(w => w && typeof w.answer === 'string' && typeof w.clue === 'string')
+              .map(w => ({
+                  answer: w.answer.toUpperCase().replace(/[^A-Z]/g, ''),
+                  clue: w.clue.trim()
+              }))
+              .filter(w => w.answer.length >= 3);
+
           if (words.length === 0) {
-              alert("No valid words found. Use format 'WORD: Clue' per line.");
+              alert("No valid words found. Words must be at least 3 letters long (A-Z only).");
               return;
           }
 
