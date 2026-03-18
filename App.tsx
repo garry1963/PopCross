@@ -53,7 +53,8 @@ const INITIAL_STATS: UserStats = {
   currentStreak: 0,
   maxStreak: 0,
   lastDailyDate: null,
-  badges: BADGES
+  badges: BADGES,
+  hiddenCategories: []
 };
 
 const INITIAL_SETTINGS: GameSettings = {
@@ -61,7 +62,8 @@ const INITIAL_SETTINGS: GameSettings = {
     region: 'Global',
     generationMode: 'online',
     soundEnabled: true,
-    hapticEnabled: true
+    hapticEnabled: true,
+    hiddenCategories: []
 };
 
 const POINTS_BY_DIFFICULTY: Record<string, number> = {
@@ -116,6 +118,14 @@ export default function App() {
 
   // --- Persistence & Auth ---
   useEffect(() => {
+    // 2. Load Local Data first so we can filter categories
+    const savedStats = localStorage.getItem('popcross_stats_v2');
+    let loadedStats = INITIAL_STATS;
+    if (savedStats) {
+        loadedStats = JSON.parse(savedStats);
+        setStats(loadedStats);
+    }
+
     // Load Custom Categories
     const customCats = getCustomCategories();
     // Merge with defaults, ensuring no duplicates if IDs clash (though they shouldn't)
@@ -127,7 +137,10 @@ export default function App() {
             merged.push({ ...c, icon: <Hash size={20}/>, isCustom: true });
         }
     });
-    setCategories(merged);
+    
+    // Filter out hidden categories
+    const hidden = loadedStats.hiddenCategories || [];
+    setCategories(merged.filter(c => !hidden.includes(c.id)));
 
     // 1. Initialize Firebase Auth
     const unsubscribe = initAuth((firebaseUser) => {
@@ -139,10 +152,6 @@ export default function App() {
             // loadUserStats(firebaseUser).then(remoteStats => { if(remoteStats) setStats(remoteStats); });
         }
     });
-
-    // 2. Load Local Data
-    const savedStats = localStorage.getItem('popcross_stats_v2');
-    if (savedStats) setStats(JSON.parse(savedStats));
 
     const savedGame = loadGameState();
     if (savedGame) setSavedGameExists(true);
@@ -827,10 +836,17 @@ export default function App() {
       setNewCategoryName("");
   };
 
-  const handleDeleteCategory = (id: string) => {
-      if (!confirm(`Delete category "${id}" and all its words?`)) return;
+  const handleDeleteCategory = (id: string, isCustom?: boolean) => {
+      if (!confirm(`Remove category "${id}"?`)) return;
       
-      deleteCustomCategory(id);
+      if (isCustom) {
+          deleteCustomCategory(id);
+      } else {
+          setStats(prev => ({
+              ...prev,
+              hiddenCategories: [...(prev.hiddenCategories || []), id]
+          }));
+      }
       setCategories(prev => prev.filter(c => c.id !== id));
   };
 
@@ -1453,17 +1469,17 @@ export default function App() {
                           <div>
                               <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Your Categories</h3>
                               <div className="flex flex-col gap-2 max-h-48 overflow-y-auto pr-2 custom-scrollbar">
-                                  {categories.filter(c => c.isCustom).length === 0 && (
-                                      <div className="text-slate-600 text-xs italic text-center py-4">No custom categories yet.</div>
+                                  {categories.length === 0 && (
+                                      <div className="text-slate-600 text-xs italic text-center py-4">No categories available.</div>
                                   )}
-                                  {categories.filter(c => c.isCustom).map(cat => (
+                                  {categories.map(cat => (
                                       <div key={cat.id} className="flex items-center justify-between p-3 bg-slate-950 rounded-lg border border-slate-800">
                                           <div className="flex items-center gap-3">
-                                              <div className="text-slate-500"><Hash size={16}/></div>
+                                              <div className={`scale-75 ${cat.color || 'text-slate-500'}`}>{cat.icon}</div>
                                               <span className="text-sm font-bold text-white">{cat.label}</span>
                                           </div>
                                           <button 
-                                              onClick={() => handleDeleteCategory(cat.id)}
+                                              onClick={() => handleDeleteCategory(cat.id, cat.isCustom)}
                                               className="text-slate-600 hover:text-red-400 p-2 rounded hover:bg-red-900/20 transition-colors"
                                           >
                                               <Trash2 size={16} />

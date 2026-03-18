@@ -44,6 +44,7 @@ export interface GameSettings {
   generationMode: GenerationMode;
   soundEnabled: boolean;
   hapticEnabled: boolean;
+  hiddenCategories?: string[];
 }
 
 export interface Badge {
@@ -66,6 +67,7 @@ export interface UserStats {
   maxStreak: number;
   lastDailyDate: string | null;
   badges: Badge[];
+  hiddenCategories?: string[];
 }
 
 export interface GameState {
